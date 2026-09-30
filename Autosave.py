@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║                     NPP AUTOSAVE v1.2.0                          ║
+║                     NPP AUTOSAVE v1.3.0                          ║
 ║         Intelligent autosave for Notepad++                       ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  Author:  Rickard Längkvist                                      ║
@@ -22,18 +22,47 @@
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = u"Rickard Längkvist"
 __license__ = "MIT"
 
 from Npp import notepad, editor, console, NOTIFICATION, STATUSBARSECTION
+import ctypes
+import hashlib
 import os
 import io
 import json
 import shutil
 import time
-import threading
 from datetime import datetime
+
+try:
+    from html import escape as _html_escape        # Python 3
+except ImportError:
+    from cgi import escape as _html_escape        # Python 2
+
+try:
+    from urllib.parse import quote as _url_quote   # Python 3
+except ImportError:
+    from urllib import quote as _url_quote         # Python 2
+
+
+def escape_html(value):
+    """Escape text so it can be inserted safely into HTML (attribute-safe)."""
+    if value is None:
+        return u""
+    if not isinstance(value, type(u"")):
+        value = u"{}".format(value)
+    return _html_escape(value, quote=True)
+
+
+def file_url(path):
+    """Build a properly percent-encoded file:/// URL from a filesystem path."""
+    p = u"{}".format(path).replace(u"\\", u"/")
+    if not isinstance(p, bytes):
+        p = p.encode("utf-8")
+    # safe=":/" keeps the drive letter colon and slashes unencoded
+    return u"file:///" + _url_quote(p, safe=":/")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -57,6 +86,10 @@ DEFAULT_CONFIG = {
     "show_statusbar": True,
     "theme": "dark"
 }
+
+# Minimum seconds between two *different* backups of the same file.
+# Identical content is never backed up twice (see create_backup).
+MIN_BACKUP_INTERVAL = 60
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -236,21 +269,19 @@ def get_document_name(text, index):
 
 
 def is_file_saved(filepath):
-    """Check if file is already saved to disk (not a new unsaved file)."""
+    """Check if buffer has a real path on disk (not a new/untitled buffer).
+
+    Notepad++ returns an absolute path (e.g. "C:\\...") for files that have
+    been saved once, and a short relative name ("new 1") for untitled buffers.
+    Using os.path.isabs() instead of os.path.exists() means that if a file is
+    deleted or moved while it is open, autosave keeps writing to the ORIGINAL
+    location (recreating the file) instead of silently redirecting new saves
+    to the NPP folder under a different name.
+    """
     if not filepath:
         return False
-    
-    # "new 1", "new 2" etc are unsaved
-    basename = os.path.basename(filepath).lower()
-    if basename.startswith("new "):
-        try:
-            int(basename[4:])
-            return False
-        except ValueError:
-            pass
-    
-    # Check if file exists on disk
-    return os.path.exists(filepath)
+
+    return os.path.isabs(filepath)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -311,6 +342,10 @@ def update_stats(filename, size):
 # ══════════════════════════════════════════════════════════════════
 # BACKUP MANAGEMENT
 # ══════════════════════════════════════════════════════════════════
+# name -> (content_hash, timestamp of last actual backup write)
+_backup_state = {}
+
+
 def move_old_backups():
     """Move old backups to _old folder."""
     try:
@@ -367,17 +402,35 @@ def limit_backups(name):
 
 
 def create_backup(name, text):
-    """Create a backup copy of the file."""
+    """Create a backup copy of the file.
+
+    Skips the write when the content is identical to the last backup, and
+    throttles changed content to at most one backup per MIN_BACKUP_INTERVAL
+    seconds per file. This prevents backup spam (previously a new timestamped
+    copy was written on every idle save, i.e. every ~10 s while typing).
+    """
     try:
+        digest = hashlib.md5(text.encode("utf-8")).hexdigest()
+        now = time.time()
+        prev = _backup_state.get(name)
+
+        if prev is not None:
+            prev_digest, prev_time = prev
+            if prev_digest == digest:
+                return                      # identical content – skip
+            if (now - prev_time) < MIN_BACKUP_INTERVAL:
+                return                      # too soon since last backup
+
         ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         backup_filename = u"{}_{}.txt".format(name, ts)
         backup_path = os.path.join(BACKUP_DIR, backup_filename)
-        
+
         with io.open(backup_path, "w", encoding="utf-8") as f:
             f.write(text)
-        
+
+        _backup_state[name] = (digest, now)
         limit_backups(name)
-        
+
     except Exception as e:
         log(u"Error creating backup: {}".format(e), "ERROR")
 
@@ -484,17 +537,19 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
     def file_rows(files):
         rows = u""
         for f in files:
-            url = "file:///" + f["path"].replace("\\", "/").replace(" ", "%20")
+            url = escape_html(file_url(f["path"]))
             date = datetime.fromtimestamp(f["mtime"]).strftime("%Y-%m-%d %H:%M")
             ago = format_time_ago(f["mtime"])
             size = format_size(f["size"])
+            name = escape_html(f["name"])
+            name_lower = escape_html(f["name"].lower())
             
             rows += u'''
                 <tr class="file-row" data-name="{}">
                     <td><a href="{}" class="file-link">{}</a></td>
                     <td class="size">{}</td>
                     <td class="date" title="{}">{}</td>
-                </tr>'''.format(f["name"].lower(), url, f["name"], size, date, ago)
+                </tr>'''.format(name_lower, url, name, size, date, ago)
         return rows
     
     current_year = datetime.now().year
@@ -839,14 +894,14 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
         total_saves=stats.get("total_saves", 0),
         recent_count=recent_count,
         avg_per_day=avg_per_day,
-        largest_file=largest_file["name"] if largest_file else "N/A",
+        largest_file=escape_html(largest_file["name"]) if largest_file else "N/A",
         total_bytes_saved=format_size(stats.get("total_bytes_saved", 0)),
         main_content=u"<table>{}</table>".format(file_rows(main_files)) if main_files else u'<div class="empty-state">Inga dokument än</div>',
         backup_content=u"<table>{}</table>".format(file_rows(backup_files)) if backup_files else u'<div class="empty-state">Inga backups än</div>',
         old_content=u"<table>{}</table>".format(file_rows(old_files)) if old_files else u'<div class="empty-state">Inga arkiv än</div>',
-        config=CONFIG_FILE.replace("\\", "/"),
-        log=LOG_FILE.replace("\\", "/"),
-        folder=BASE_DIR.replace("\\", "/")
+        config=escape_html(file_url(CONFIG_FILE)),
+        log=escape_html(file_url(LOG_FILE)),
+        folder=escape_html(file_url(BASE_DIR))
     )
     
     return html
@@ -862,8 +917,8 @@ def save_buffer(buffer_id, index):
     try:
         current_buffer = notepad.getCurrentBufferID()
         
-        # Switch to target buffer
-        notepad.activateBufferID(buffer_id, 0)
+        # Switch to target buffer (API takes exactly ONE argument)
+        notepad.activateBufferID(buffer_id)
         
         # Check if modified
         if not editor.getModify():
@@ -874,14 +929,18 @@ def save_buffer(buffer_id, index):
         
         # Get text
         text = editor.getText()
-        if not text:
-            return False
         
         if isinstance(text, bytes):
             text = text.decode("utf-8", errors="replace")
         
-        # Check if file is already saved to disk
-        if is_file_saved(filepath):
+        saved = is_file_saved(filepath)
+        
+        # An empty buffer is only skippable when it is a NEW (untitled) file.
+        # Emptying an existing file is a valid edit that must be saved.
+        if not text and not saved:
+            return False
+        
+        if saved:
             # ═══ ALREADY SAVED FILE: Save to original location ═══
             notepad.save()
             
@@ -923,7 +982,7 @@ def save_buffer(buffer_id, index):
         # Switch back to original buffer
         try:
             if current_buffer is not None and current_buffer != buffer_id:
-                notepad.activateBufferID(current_buffer, 0)
+                notepad.activateBufferID(current_buffer)
         except Exception:
             pass
 
@@ -941,14 +1000,18 @@ def save_current_buffer():
         
         # Get text
         text = editor.getText()
-        if not text:
-            return False
         
         if isinstance(text, bytes):
             text = text.decode("utf-8", errors="replace")
         
-        # Check if file is already saved to disk
-        if is_file_saved(filepath):
+        saved = is_file_saved(filepath)
+        
+        # An empty buffer is only skippable when it is a NEW (untitled) file.
+        # Emptying an existing file is a valid edit that must be saved.
+        if not text and not saved:
+            return False
+        
+        if saved:
             # ═══ ALREADY SAVED FILE: Save to original location ═══
             notepad.save()
             
@@ -1085,84 +1148,108 @@ def open_folder():
 class AutoSaver:
     """
     Dual-mode autosaver:
-    1. Idle-based: Saves active tab 10s after inactivity
+    1. Idle-based: Saves the edited tab N seconds after inactivity
     2. Interval-based: Saves ALL tabs every 5 minutes
+
+    Timing is driven by a Win32 timer (user32.SetTimer) created on the
+    Notepad++ main thread, so the callback runs on the UI thread and it
+    is safe to call the Notepad++/Scintilla API from it. The previous
+    implementation used threading.Timer (background threads), which is
+    NOT thread-safe against Notepad++ and could crash or hang it.
     """
-    
+
+    TICK_MS = 500  # timer resolution in milliseconds
+
     def __init__(self):
-        self.idle_timer = None
-        self.last_change = 0
-        self.pending_idle_save = False
-        self.interval_timer = None
-        self.lock = threading.Lock()
         self.running = False
+        self.timer_id = None
+        self._timer_proc = None       # keeps the ctypes callback alive
+        self.last_change = 0.0
+        self.target_buffer = None     # buffer that was being edited
+        self.pending_idle_save = False
+        self.last_interval = 0.0
         self.maintenance_count = 0
-    
+
     def on_text_changed(self, args):
-        """Called on every text change - triggers idle save."""
-        with self.lock:
-            self.last_change = time.time()
-            self.pending_idle_save = True
-            
-            if self.idle_timer:
-                self.idle_timer.cancel()
-            
-            idle_time = get_idle_time()
-            self.idle_timer = threading.Timer(idle_time, self._idle_save)
-            self.idle_timer.daemon = True
-            self.idle_timer.start()
-            
-            update_statusbar(u"⏳ Sparas om {}s...".format(idle_time))
+        """Called on the UI thread on every text change - schedules idle save."""
+        if not self.running:
+            return
+
+        self.last_change = time.time()
+        self.pending_idle_save = True
+
+        # Remember WHICH buffer is being edited, so the idle save hits the
+        # right tab even if the user switches away before the timer fires.
+        try:
+            self.target_buffer = notepad.getCurrentBufferID()
+        except Exception:
+            self.target_buffer = None
+
+        update_statusbar(u"⏳ Sparas om {}s...".format(get_idle_time()))
     
-    def _idle_save(self):
-        """Save active tab after idle time."""
-        with self.lock:
-            if not self.pending_idle_save:
+    def _buffer_index(self, buffer_id):
+        """Find the tab index of a buffer (used for new-file naming)."""
+        try:
+            for i, f in enumerate(notepad.getFiles()):
+                if len(f) >= 2 and f[1] == buffer_id:
+                    return i
+        except Exception:
+            pass
+        return 0
+
+    def _do_idle_save(self):
+        """Save the buffer that was being edited, not whatever tab is active now."""
+        global last_save_time
+
+        target = self.target_buffer
+        try:
+            current = notepad.getCurrentBufferID()
+        except Exception:
+            current = None
+
+        if target is None or target == current:
+            # Fast path: still on the same tab - no buffer switching needed
+            return save_current_buffer()
+
+        # The user switched away - save the original target buffer instead
+        ok = save_buffer(target, self._buffer_index(target))
+        if ok:
+            last_save_time = datetime.now()
+            update_statusbar(u"✓ Sparad {}".format(last_save_time.strftime("%H:%M:%S")))
+        return ok
+
+    def tick(self, hwnd, msg, timer_id, ticks):
+        """UI-thread timer callback (runs ~2x/second)."""
+        try:
+            if not self.running:
                 return
-            
-            elapsed = time.time() - self.last_change
-            idle_time = get_idle_time()
-            
-            if elapsed >= idle_time:
+
+            now = time.time()
+
+            # ── Idle save: correct buffer, only after inactivity ──
+            if self.pending_idle_save and (now - self.last_change) >= get_idle_time():
                 self.pending_idle_save = False
                 try:
-                    if save_current_buffer():
+                    if self._do_idle_save():
                         generate_index()
                 except Exception as e:
                     log(u"Idle save error: {}".format(e), "ERROR")
-            else:
-                remaining = idle_time - elapsed
-                self.idle_timer = threading.Timer(remaining, self._idle_save)
-                self.idle_timer.daemon = True
-                self.idle_timer.start()
-    
-    def _schedule_interval_save(self):
-        """Schedule next interval save."""
-        if not self.running:
-            return
-        
-        interval = get_interval_time()
-        self.interval_timer = threading.Timer(interval, self._interval_save)
-        self.interval_timer.daemon = True
-        self.interval_timer.start()
-    
-    def _interval_save(self):
-        """Save ALL tabs on interval."""
-        if not self.running:
-            return
-        
-        try:
-            save_all_buffers()
-            
-            self.maintenance_count += 1
-            if self.maintenance_count >= 10:
-                self.maintenance_count = 0
-                move_old_backups()
-                
+
+            # ── Interval save: ALL tabs ──
+            if (now - self.last_interval) >= get_interval_time():
+                self.last_interval = now
+                try:
+                    save_all_buffers()
+
+                    self.maintenance_count += 1
+                    if self.maintenance_count >= 10:
+                        self.maintenance_count = 0
+                        move_old_backups()
+                except Exception as e:
+                    log(u"Interval save error: {}".format(e), "ERROR")
+
         except Exception as e:
-            log(u"Interval save error: {}".format(e), "ERROR")
-        
-        self._schedule_interval_save()
+            log(u"AutoSaver tick error: {}".format(e), "ERROR")
     
     def start(self):
         """Start both idle and interval monitoring."""
@@ -1173,33 +1260,51 @@ class AutoSaver:
         
         try:
             editor.callback(self.on_text_changed, [NOTIFICATION.MODIFIED])
-            self._schedule_interval_save()
-            
+        except Exception as e:
+            log(u"Error registering callback: {}".format(e), "ERROR")
+
+        # Win32 timer with NULL hwnd is associated with the calling thread
+        # (the script runs on Notepad++'s main thread), so the callback is
+        # invoked from the message loop ON THE UI THREAD - safe for the API.
+        try:
+            self._timer_proc = ctypes.WINFUNCTYPE(
+                None, ctypes.c_void_p, ctypes.c_uint,
+                ctypes.c_size_t, ctypes.c_uint
+            )(self.tick)
+            user32 = ctypes.windll.user32
+            user32.SetTimer.restype = ctypes.c_size_t
+            self.timer_id = user32.SetTimer(None, 0, self.TICK_MS, self._timer_proc)
+            if not self.timer_id:
+                raise RuntimeError("SetTimer returned 0")
+        except Exception as e:
+            self.timer_id = None
+            log(u"Error creating timer: {}".format(e), "ERROR")
+
+        try:
+            self.last_interval = time.time()
+
             idle = get_idle_time()
             interval = get_interval_time()
-            
+
             log(u"AutoSaver started")
             log(u"  - Active tab: {}s after idle".format(idle))
             log(u"  - All tabs: every {}s ({}min)".format(interval, interval // 60))
-            
+
             update_statusbar(u"✓ Autosave aktiv")
-            
+
         except Exception as e:
             log(u"Error starting AutoSaver: {}".format(e), "ERROR")
-    
+
     def stop(self):
         """Stop all monitoring."""
         self.running = False
         
         try:
-            if self.idle_timer:
-                self.idle_timer.cancel()
-                self.idle_timer = None
-            
-            if self.interval_timer:
-                self.interval_timer.cancel()
-                self.interval_timer = None
-            
+            if self.timer_id is not None:
+                ctypes.windll.user32.KillTimer(None, self.timer_id)
+                self.timer_id = None
+            self._timer_proc = None
+
             editor.clearCallbacks([NOTIFICATION.MODIFIED])
             log(u"AutoSaver stopped")
             
@@ -1212,7 +1317,6 @@ class AutoSaver:
 # ══════════════════════════════════════════════════════════════════
 try:
     _autosaver.stop()
-    time.sleep(0.3)
 except NameError:
     pass
 except Exception:
