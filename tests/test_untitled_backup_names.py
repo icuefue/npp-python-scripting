@@ -23,9 +23,11 @@ class UntitledBackupTests(unittest.TestCase):
         npp.console = mock.Mock()
         npp.NOTIFICATION = types.SimpleNamespace(MODIFIED=1)
         npp.STATUSBARSECTION = types.SimpleNamespace(DOCTYPE=1)
+        self.npp = npp
         spec = importlib.util.spec_from_file_location(
             "autosave_test", Path(__file__).resolve().parents[1] / "Autosave.py"
         )
+        self.spec = spec
         self.autosave = importlib.util.module_from_spec(spec)
         with mock.patch.dict(sys.modules, {"Npp": npp}), mock.patch.dict(
             os.environ, {"HOME": self.temp.name}
@@ -48,6 +50,22 @@ class UntitledBackupTests(unittest.TestCase):
             json.dumps(metadata), encoding="utf-8"
         )
         return path
+
+    def test_startup_leaves_existing_copy_names_and_contents_unchanged(self):
+        copy = self.write_copy("My Notes_abcdef12.txt")
+        content = b"first\r\n\r\n\r\nsecond\r\n"
+        copy.write_bytes(content)
+        metadata_path = Path(str(copy) + ".meta.json")
+        metadata = metadata_path.read_bytes()
+        with mock.patch.dict(sys.modules, {"Npp": self.npp}), mock.patch.dict(
+            os.environ, {"HOME": self.temp.name}
+        ):
+            self.spec.loader.exec_module(self.autosave)
+        self.assertEqual(copy.read_bytes(), content)
+        self.assertEqual(metadata_path.read_bytes(), metadata)
+        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), [
+            copy.name, metadata_path.name
+        ])
 
     def test_new_copy_is_stable_and_avoids_existing_files(self):
         a = self.autosave
@@ -85,43 +103,6 @@ class UntitledBackupTests(unittest.TestCase):
         self.assertEqual(len(copies), 1)
         self.assertTrue(copies[0].name.startswith("2026-11-25_15-30-00_"))
         self.assertEqual(copies[0].read_text(), "changed line")
-
-    def test_migration_preserves_content_metadata_and_saved_files(self):
-        a = self.autosave
-        old = self.write_copy("My Notes_abcdef12.txt")
-        original_bytes = b"first\r\n\r\nsecond\r\n"
-        old.write_bytes(original_bytes)
-        saved = self.write_copy("report_abcdef12.txt", "file")
-        target_base = a.get_backup_name(str(old), "2024-02-29_10-20-30")
-        collision = self.directory / (target_base + ".txt")
-        collision.write_text("do not overwrite", encoding="utf-8")
-
-        a.migrate_untitled_copies(str(self.directory))
-        target = self.directory / (target_base + "_2.txt")
-        self.assertFalse(old.exists())
-        self.assertFalse(Path(str(old) + ".meta.json").exists())
-        self.assertEqual(target.read_bytes(), original_bytes)
-        self.assertEqual(collision.read_text(), "do not overwrite")
-        self.assertTrue(saved.exists())
-        metadata = json.loads(Path(str(target) + ".meta.json").read_text())
-        self.assertEqual(metadata["copy_name"], target.name)
-        self.assertEqual(metadata["copy_path"], str(target))
-        self.assertEqual(metadata["created_at"], "2024-02-29T10:20:30.123456")
-        self.assertEqual(metadata["copy_count"], 4)
-        a.migrate_untitled_copies(str(self.directory))
-        self.assertTrue(target.exists())
-        self.assertEqual(len(list(self.directory.glob("2024-02-29_10-20-30_*"))), 3)
-
-    def test_failed_migration_retains_original_and_cleans_partial_copy(self):
-        a = self.autosave
-        old = self.write_copy("My Notes_abcdef12.txt")
-        with mock.patch.object(a.shutil, "copyfileobj", side_effect=OSError("disk full")):
-            a.migrate_untitled_copies(str(self.directory))
-        self.assertEqual(old.read_text(), "original content")
-        self.assertTrue(Path(str(old) + ".meta.json").exists())
-        self.assertEqual(sorted(p.name for p in self.directory.iterdir()), [
-            "My Notes_abcdef12.txt", "My Notes_abcdef12.txt.meta.json"
-        ])
 
     def test_index_links_address_backup_names_not_originals(self):
         a = self.autosave
@@ -172,114 +153,6 @@ class UntitledBackupTests(unittest.TestCase):
                         str(self.directory), name, text, force=True
                     ))
                     self.assertEqual(copy.read_bytes(), expected)
-
-    def test_repairs_verified_bytes_and_keeps_damaged_file_and_metadata(self):
-        a = self.autosave
-        text = "first\r\n\r\nsecond\nthird\rfourth"
-        expected = text.encode("utf-8")
-        for directory in (self.directory, Path(a.OLD_DIR)):
-            self.assertTrue(a.save_external_copy(str(directory), "damaged", text))
-            copy = directory / "damaged.txt"
-            copy.write_bytes(expected.replace(b"\n", b"\r\n"))
-        metadata_path = self.directory / "damaged.txt.meta.json"
-        metadata_before = metadata_path.read_bytes()
-        self.assertEqual(a.repair_copy_newlines(), 2)
-        self.assertEqual((self.directory / "damaged.txt").read_bytes(), expected)
-        self.assertEqual((Path(a.OLD_DIR) / "damaged.txt").read_bytes(), expected)
-        self.assertEqual(metadata_path.read_bytes(), metadata_before)
-        backups = list((Path(a.META_DIR) / "newline_repairs").glob("*/damaged.txt"))
-        self.assertEqual(len(backups), 2)
-        for backup in backups:
-            self.assertEqual(backup.read_bytes(), expected.replace(b"\n", b"\r\n"))
-            self.assertTrue(Path(str(backup) + ".meta.json").exists())
-        self.assertEqual(a.repair_copy_newlines(), 0)
-
-    def test_repair_does_not_guess_when_metadata_is_missing_or_does_not_match(self):
-        a = self.autosave
-        missing_metadata = self.directory / "unverified.txt"
-        missing_metadata.write_bytes(b"first\r\r\nsecond")
-        self.assertTrue(a.save_external_copy(str(self.directory), "mismatch", "known\r\n"))
-        mismatched = self.directory / "mismatch.txt"
-        mismatched.write_bytes(b"different\r\r\n")
-        self.assertEqual(a.repair_copy_newlines(), 0)
-        self.assertEqual(missing_metadata.read_bytes(), b"first\r\r\nsecond")
-        self.assertEqual(mismatched.read_bytes(), b"different\r\r\n")
-        self.assertFalse((Path(a.META_DIR) / "newline_repairs").exists())
-
-    def test_failed_repair_write_leaves_original_and_backup_intact(self):
-        a = self.autosave
-        self.assertTrue(a.save_external_copy(str(self.directory), "damaged", "first\r\n"))
-        copy = self.directory / "damaged.txt"
-        damaged = b"first\r\r\n"
-        copy.write_bytes(damaged)
-        with mock.patch.object(a.os, "fsync", side_effect=OSError("disk full")):
-            self.assertEqual(a.repair_copy_newlines(), 0)
-        self.assertEqual(copy.read_bytes(), damaged)
-        backups = list((Path(a.META_DIR) / "newline_repairs").glob("*/damaged.txt"))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_bytes(), damaged)
-        self.assertFalse(list(self.directory.glob(".newline-repair-*")))
-
-    def test_repair_uses_windows_atomic_replacement_for_unicode_paths(self):
-        a = self.autosave
-        self.assertTrue(a.save_external_copy(str(self.directory), "reparar_\u00f1", "first\r\n"))
-        copy = self.directory / "reparar_\u00f1.txt"
-        copy.write_bytes(b"first\r\r\n")
-        real_replace = os.replace
-
-        def move_file(source, destination, flags):
-            real_replace(source, destination)
-            return 1
-
-        with mock.patch.object(a.os, "name", "nt"), \
-                mock.patch.object(a.ctypes, "windll", create=True) as windll:
-            windll.kernel32.MoveFileExW.side_effect = move_file
-            self.assertEqual(a.repair_copy_newlines(), 1)
-            self.assertEqual(windll.kernel32.MoveFileExW.call_args.args[1:], (str(copy), 0x9))
-        self.assertEqual(copy.read_bytes(), b"first\r\n")
-
-    def test_aggressive_repair_collapses_only_three_or_more_logical_line_breaks(self):
-        a = self.autosave
-        cases = [
-            ("a\r\nb\r\n\r\nc\r\n\r\n\r\nd\r\n\r\n\r\n\r\n",
-             "a\r\nb\r\n\r\nc\r\nd\r\n"),
-            ("a\nb\n\nc\n\n\nd\n\n\n\n", "a\nb\n\nc\nd\n"),
-            ("a\rb\r\rc\r\r\rd\r\r\r\r", "a\rb\r\rc\rd\r"),
-            ("a\r\n\n\rb\n\r\nc\r\r\nd", "a\r\nb\n\r\nc\r\r\nd"),
-        ]
-        for index, (text, expected) in enumerate(cases):
-            with self.subTest(text=repr(text)):
-                name = "aggressive_{}".format(index)
-                self.assertTrue(a.save_external_copy(str(self.directory), name, text))
-                copy = self.directory / (name + ".txt")
-                metadata_before = a.load_copy_metadata(str(copy))
-                self.assertEqual(a.repair_copy_newlines(aggressive=True), 1)
-                self.assertEqual(copy.read_bytes(), expected.encode("utf-8"))
-                metadata = a.load_copy_metadata(str(copy))
-                self.assertEqual(metadata["sha256"], hashlib.sha256(copy.read_bytes()).hexdigest())
-                self.assertEqual(metadata["size_bytes"], len(copy.read_bytes()))
-                self.assertEqual(metadata["line_count"], len(expected.splitlines()))
-                self.assertEqual(metadata["created_at"], metadata_before["created_at"])
-                self.assertEqual(metadata["copy_count"], metadata_before["copy_count"])
-                backups = list((Path(a.META_DIR) / "newline_repairs").glob("*/" + copy.name))
-                self.assertEqual(len(backups), 1)
-                self.assertEqual(backups[0].read_bytes(), text.encode("utf-8"))
-        self.assertEqual(a.repair_copy_newlines(aggressive=True), 0)
-
-    def test_aggressive_repair_handles_archived_copies_without_metadata(self):
-        a = self.autosave
-        copy = Path(a.OLD_DIR) / "without_metadata.txt"
-        damaged = "primera \u00f1\r\n\r\n\r\nsegunda".encode("utf-8")
-        copy.write_bytes(damaged)
-        self.assertEqual(a.repair_copy_newlines(aggressive=True), 1)
-        self.assertEqual(copy.read_bytes(), "primera \u00f1\r\nsegunda".encode("utf-8"))
-        metadata = a.load_copy_metadata(str(copy))
-        self.assertEqual(metadata["sha256"], hashlib.sha256(copy.read_bytes()).hexdigest())
-        self.assertEqual(metadata["character_count"], len("primera \u00f1\r\nsegunda"))
-        backups = list((Path(a.META_DIR) / "newline_repairs").glob("*/" + copy.name))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].read_bytes(), damaged)
-
 
 if __name__ == "__main__":
     unittest.main()

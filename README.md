@@ -100,32 +100,6 @@ The document stays marked as modified. Save manually in Notepad++ when you
 want to update the original file.
 Copies are UTF-8 and preserve the editor's exact line endings (CRLF, LF, CR,
 or mixed) and intentional blank lines, without Windows newline translation.
-Updating the script prevents new corruption; it does not automatically repair
-line endings in existing copies.
-
-To repair affected copies, reload the updated script and run
-`repair_copy_newlines()` in the PythonScript console. It checks `_backup` and
-`_old`, reverses one Windows newline translation, and restores a copy only if
-the recovered bytes match its recorded SHA-256 exactly. Already matching copies
-are unchanged. Copies with missing or nonmatching hashes are left untouched,
-with warnings in `autosave.log`; intentional blank lines are never guessed away.
-This restores the content recorded before the last copy write, not damage
-already present in that editor buffer.
-
-For a more aggressive cleanup, run `repair_copy_newlines(aggressive=True)`.
-This does not require a matching or existing SHA-256: it reduces each run of
-**three or more consecutive line breaks to one**, counting CRLF as a single
-break and also supporting LF, CR, and mixed endings. Single and double breaks
-remain unchanged; the retained break uses the first break's format. This can
-remove intentional blank lines, so it only runs when explicitly requested.
-The metadata hash and content counts are updated to match the repaired UTF-8
-file, without incrementing its copy count.
-
-Before each repair, the damaged file and any existing metadata are preserved
-in a unique `_meta/newline_repairs/copy-*` directory. File replacement is atomic;
-the original modification time is retained. The HTML index is refreshed after
-repairs. If a repaired copy is open in Notepad++, reload it from disk when
-prompted instead of saving the old tab contents over it.
 📂 Folder Structure
 text
 
@@ -151,10 +125,8 @@ C:\Users\YourName\Documents\NPP\
 
 Untitled copies use the date and time of their first copy and a collision
 suffix; their name remains stable while the buffer is open. Copies of saved
-files keep their original name and identity suffix. On startup, existing
-untitled copies with metadata are renamed in `_backup` and `_old` using their
-recorded first-copy time. Copies without usable metadata are left unchanged;
-migration errors are reported in `autosave.log`.
+files keep their original name and identity suffix. Existing copies are not
+renamed or repaired on startup.
 ⚙️ Configuration
 Edit the bootstrap configuration at:
 
@@ -190,8 +162,6 @@ Command	Description
 manual_save()	Create an external copy of the active tab
 manual_save_all()	Create external copies of all modified tabs
 manual_force_save_all()	Force an external copy of every open tab
-repair_copy_newlines()	Repair newline translation only when SHA-256 verifies the result
-repair_copy_newlines(aggressive=True)	Reduce runs of 3+ line breaks to one, with backups
 open_index()	Open index in browser
 open_config()	Open config file
 open_folder()	Open NPP folder in Explorer
