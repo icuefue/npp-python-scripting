@@ -10,6 +10,11 @@ import subprocess
 import sys
 import webbrowser
 
+_scripts_dir = os.path.dirname(os.path.abspath(__file__))
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+import AutosaveStorage
+
 try:
     from urllib.parse import quote
 except ImportError:
@@ -23,32 +28,9 @@ def npp_string(value):
     return value
 
 
-def get_config_dir():
-    path = os.path.expanduser("~/Documents/NPP")
-    if isinstance(path, bytes):
-        path = path.decode(sys.getfilesystemencoding())
-    return path
-
-
 def get_index_path():
-    """Resolve the same bootstrap configuration used by Autosave.py."""
-    config_dir = get_config_dir()
-    config_path = os.path.join(config_dir, "config.txt")
-    base_dir = config_dir
-    if os.path.exists(config_path):
-        with io.open(config_path, "r", encoding="utf-8") as config:
-            for line in config:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                if key.strip().lower() == "base_dir":
-                    base_dir = value.strip().strip(u"'\"")
-                    break
-    base_dir = os.path.expandvars(os.path.expanduser(base_dir))
-    if not os.path.isabs(base_dir):
-        base_dir = os.path.join(config_dir, base_dir)
-    return os.path.normpath(os.path.join(base_dir, "index.html"))
+    """Open the active directory, not a pending configuration change."""
+    return os.path.join(AutosaveStorage.active_base_dir(), "index.html")
 
 
 def register_protocol(base_dir):
@@ -72,7 +54,7 @@ def register_protocol(base_dir):
         if not os.path.isfile(path):
             raise IOError(u"No existe el ejecutable necesario:\n{}".format(path))
 
-    install_dir = os.path.join(get_config_dir(), "_protocol")
+    install_dir = os.path.join(base_dir, "_protocol")
     if not os.path.isdir(install_dir):
         os.makedirs(install_dir)
     handler = os.path.join(install_dir, "OpenAutosaveFile.ps1")
@@ -113,7 +95,7 @@ def open_autosave_index():
         if not webbrowser.open(url):
             raise RuntimeError(u"No se pudo abrir el navegador para:\n{}".format(index_path))
         return True
-    except (IOError, OSError, RuntimeError, UnicodeError) as error:
+    except (IOError, OSError, RuntimeError, UnicodeError, ValueError) as error:
         notepad.messageBox(npp_string(u"{}".format(error)), "NPP Autosave - Indice")
         return False
 

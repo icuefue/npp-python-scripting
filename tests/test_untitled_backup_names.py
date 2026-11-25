@@ -11,12 +11,18 @@ import tempfile
 import types
 import unittest
 from unittest import mock
+import AutosaveStorage
 
 
 class UntitledBackupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        locator = mock.patch.object(
+            AutosaveStorage, "LOCATOR_FILE", str(Path(self.temp.name) / "locator")
+        )
+        locator.start()
+        self.addCleanup(locator.stop)
         npp = types.ModuleType("Npp")
         npp.notepad = mock.Mock()
         npp.editor = mock.Mock()
@@ -51,6 +57,16 @@ class UntitledBackupTests(unittest.TestCase):
         )
         return path
 
+    def test_generated_copyright_notices_identify_icuefue(self):
+        a = self.autosave
+        year = datetime.datetime.now().year
+        config = Path(a.CONFIG_FILE).read_text(encoding="utf-8")
+        html = Path(a.INDEX_FILE).read_text(encoding="utf-8")
+        log = Path(a.LOG_FILE).read_text(encoding="utf-8")
+        self.assertIn("# © {} icuefue".format(year), config)
+        self.assertIn("&copy; {} icuefue".format(year), html)
+        self.assertIn("© {} icuefue".format(year), log)
+
     def test_startup_leaves_existing_copy_names_and_contents_unchanged(self):
         copy = self.write_copy("My Notes_abcdef12.txt")
         content = b"first\r\n\r\n\r\nsecond\r\n"
@@ -66,6 +82,32 @@ class UntitledBackupTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.directory.iterdir()), [
             copy.name, metadata_path.name
         ])
+
+    def test_reload_migrates_storage_and_refreshes_protocol(self):
+        a = self.autosave
+        copy = self.write_copy("My Notes_abcdef12.txt")
+        destination = Path(self.temp.name) / "new data"
+        Path(a.CONFIG_FILE).write_text(
+            "base_dir = {}\n".format(destination), encoding="utf-8"
+        )
+        protocol = Path(a.BASE_DIR) / "_protocol"
+        protocol.mkdir()
+        (protocol / "settings.json").write_text("old", encoding="utf-8")
+        register = mock.Mock()
+        modules = {
+            "Npp": self.npp,
+            "OpenAutosaveIndex": types.SimpleNamespace(register_protocol=register),
+        }
+        with mock.patch.dict(sys.modules, modules), mock.patch.dict(
+            os.environ, {"HOME": self.temp.name}
+        ):
+            self.spec.loader.exec_module(self.autosave)
+        self.assertEqual(Path(a.BASE_DIR), destination)
+        self.assertEqual((destination / "_backup" / copy.name).read_text(), "original content")
+        self.assertTrue(copy.exists())
+        self.assertTrue((destination / "index.html").exists())
+        self.assertEqual(AutosaveStorage.active_base_dir(), str(destination))
+        register.assert_called_once_with(str(destination))
 
     def test_new_copy_is_stable_and_avoids_existing_files(self):
         a = self.autosave

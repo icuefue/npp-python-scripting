@@ -1,311 +1,275 @@
-📁 NPP Autosave
-Intelligent autosave plugin for Notepad++ that automatically saves your work.
+# NPP Autosave
 
-Version
-License
-Python
+NPP Autosave v1.3.0 crea copias externas del contenido de las pestañas de Notepad++
+mediante el plugin PythonScript. Incluye un índice HTML para buscar las copias
+en el navegador y abrirlas en Notepad++.
 
-✨ Features
-Feature	Description
-💾 Smart Saving	Copies active tab 10 seconds after you stop typing
-🔄 Interval Backup	Copies ALL modified tabs every 5 minutes
-📁 Backup Mode	Existing files → backup folder only, New files → NPP folder
-📊 Statistics	Tracks saves, file sizes, and daily activity
-🔍 HTML Index	Searchable file browser with dark/light theme
-📦 Single Current Copy	One external file per open document; updates overwrite it
-⚙️ Configurable	Simple config.txt for all settings
-📥 Installation
-Step 1: Install PythonScript Plugin
-Open Notepad++
-Go to Plugins → Plugins Admin
-Search for PythonScript
-Click Install
-Restart Notepad++
-Step 2: Download Script
-Download autosave.py from Releases
+**Las copias no sustituyen el guardado normal:** el script no modifica el
+archivo original ni marca la pestaña como guardada. Usa el comando de guardar
+de Notepad++ cuando quieras actualizar el original.
 
-Place it in:
+## Contenido del repositorio
 
-text
+| Archivo | Función |
+| --- | --- |
+| [Autosave.py](./Autosave.py) | Crea las copias, mantiene las estadísticas y genera el índice. |
+| [AutosaveStorage.py](./AutosaveStorage.py) | Localiza y migra el directorio de datos. |
+| [OpenAutosaveIndex.py](./OpenAutosaveIndex.py) | Registra el protocolo de apertura para el usuario actual y abre el índice en el navegador. |
+| [OpenAutosaveFile.ps1](./OpenAutosaveFile.ps1) | Recibe los enlaces del índice y abre las copias en Notepad++. |
 
-%APPDATA%\Notepad++\plugins\config\PythonScript\scripts\
-Step 3: Enable Autostart
-Go to Plugins → PythonScript → Configuration
-Find autosave.py in the list
-Set Initialisation to ATSTARTUP
-Click OK
-Restart Notepad++
-Step 4: Verify Installation
-Open console: Plugins → PythonScript → Show Console
+## Requisitos
 
-You should see:
+- Windows y Notepad++ con el plugin **PythonScript** instalado.
+- Windows PowerShell para abrir las copias desde el índice. El resto de la
+  funcionalidad no necesita un servidor ni una instalación externa de Python.
+- Una edición de PythonScript con Python 2 o Python 3.
 
-text
+## Instalación
 
-════════════════════════════════════════════════════════════
-NPP Autosave v1.2.0 loaded
-© 2026 Rickard Längkvist
-════════════════════════════════════════════════════════════
-Folder:       C:\Users\YourName\Documents\NPP
-Idle time:    10s (active tab)
-Interval:     300s / 5min (all tabs)
-════════════════════════════════════════════════════════════
-📖 How It Works
-Save Logic
-text
+1. En Notepad++, abre **Plugins > Plugins Admin**, instala **PythonScript** y
+   reinicia Notepad++.
+2. Copia los cuatro archivos del repositorio a la carpeta de scripts del usuario
+   de PythonScript. Una ubicación habitual es:
 
-┌─────────────────────────────────────────────────┐
-│            FILE SAVE DECISION                   │
-├─────────────────────────────────────────────────┤
-│                                                 │
-│   Does the file already have a path?            │
-│                                                 │
-│        YES                      NO              │
-│         │                        │              │
-│         ▼                        ▼              │
-│   ┌───────────┐          ┌─────────────┐       │
-│   │ Create    │          │ Save to     │       │
-│   │ one copy  │          │ one copy in │       │
-│   │ in backup │          │ backup      │       │
-│   │           │          │ with date   │       │
-│   └───────────┘          └─────────────┘       │
-│         │                        │              │
-│         └──────────┬─────────────┘              │
-│                    ▼                            │
-│            ┌─────────────┐                      │
-│            │ Keep editor │                      │
-│            │ modified    │                      │
-│            └─────────────┘                      │
-│                                                 │
-└─────────────────────────────────────────────────┘
-Two Save Modes
-Mode	Trigger	Saves	Timing
-Idle	Stop typing	Active tab	10 seconds
-Interval	Timer	All tabs	Every 5 minutes
-💡 Usage Examples
-Example 1: New Document
-Open new tab (Ctrl+N)
-Type on line 1: My Notes
-Type content below
-Stop typing, wait 10 seconds
-✅ Copy saved as: 2026-03-05_10-30-00_a1b2c3d4.txt
-Example 2: Existing File
-Open C:\Projects\readme.txt
-Make changes
-Stop typing, wait 10 seconds
-✅ Original C:\Projects\readme.txt remains unchanged
-✅ Current copy updated in ~/Documents/NPP/_backup/
+   ```text
+   %APPDATA%\Notepad++\plugins\config\PythonScript\scripts\
+   ```
 
-The document stays marked as modified. Save manually in Notepad++ when you
-want to update the original file.
-Copies are UTF-8 and preserve the editor's exact line endings (CRLF, LF, CR,
-or mixed) and intentional blank lines, without Windows newline translation.
-📂 Folder Structure
-text
+   La ruta puede variar según la instalación. Mantén los cuatro archivos en la
+   misma carpeta.
+3. Ejecuta **Plugins > PythonScript > Scripts > Autosave**. El script inicia
+   la supervisión y genera el índice. Abre **Plugins > PythonScript > Show
+   Console** para comprobar los mensajes y consultar posibles errores.
+4. Para ejecutar Autosave al arrancar Notepad++, establece **Initialisation**
+   en **ATSTARTUP** en **Plugins > PythonScript > Configuration**. Añade
+   también estas líneas al `startup.py` del usuario de PythonScript:
 
-C:\Users\YourName\Documents\NPP\
-│
-├── index.html                    ← Open in browser to view files
-├── autosave.log                  ← Activity log
-│
-├── _backup/                      ← One current copy per open document
-│   ├── 2026-03-05_10-30-00_a1b2c3d4.txt
-│   ├── 2026-03-05_10-30-00_a1b2c3d4.txt.meta.json
-│   ├── 2026-03-05_10-31-00_b2c3d4e5.txt
-│   └── readme_e5f6a7b8.txt
-│
-│   Each copy has a .meta.json sidecar with source path/name, first-copy and
-│   last-update timestamps, original modification time, copy count, byte/line
-│   counts, extension, source type, and SHA-256.
-│
-├── _old/                         ← Legacy files from earlier versions
-│
-└── _meta/
-    └── stats.json                ← Statistics data
+   ```python
+   import os
+   import sys
+   from Npp import notepad
 
-Untitled copies use the date and time of their first copy and a collision
-suffix; their name remains stable while the buffer is open. Copies of saved
-files keep their original name and identity suffix. Existing copies are not
-renamed or repaired on startup.
-⚙️ Configuration
-Edit the bootstrap configuration at:
+   scripts_dir = os.path.join(notepad.getPluginConfigDir(), "PythonScript", "scripts")
+   if scripts_dir not in sys.path:
+       sys.path.insert(0, scripts_dir)
+   import Autosave
+   ```
+
+   Si has instalado los scripts en otra carpeta, ajusta `scripts_dir`. Reinicia
+   Notepad++ y comprueba la consola. `ATSTARTUP` inicia PythonScript; el código
+   en `startup.py` es el que carga Autosave.
+5. Para habilitar la apertura de copias desde el índice, ejecuta **Plugins >
+   PythonScript > Scripts > OpenAutosaveIndex** y permite al navegador abrir
+   la aplicación externa cuando lo solicite.
+
+Si no configuras el inicio automático, ejecuta Autosave manualmente en cada
+sesión de Notepad++ antes de utilizarlo.
+
+## Funcionamiento de las copias
+
+- **Por inactividad:** tras una modificación y 10 segundos sin actividad, se
+  copia la pestaña que se estaba editando, incluso si se ha cambiado de
+  pestaña.
+- **Periódica:** cada 300 segundos se procesan las pestañas modificadas.
+- Ambos tiempos son configurables. Una pestaña nueva y vacía se omite en las
+  copias normales; vaciar un archivo existente sí se considera un cambio.
+- Las copias se escriben en `_backup`, tanto para archivos existentes como
+  para pestañas nuevas. El contenido se guarda en UTF-8 y conserva los finales
+  de línea y las líneas en blanco del editor.
+- Para un archivo con ruta, el nombre de la copia incluye el nombre original,
+  un identificador derivado de su ruta y su extensión. Si no tiene extensión,
+  se usa `.txt`.
+- Para una pestaña sin guardar, el nombre incluye la fecha y hora de su primera
+  copia y un identificador; se usa un sufijo adicional si existe una colisión.
+  El nombre se mantiene durante la sesión mientras ese búfer esté abierto.
+- Las actualizaciones sobrescriben la copia actual: **no se mantiene un
+  historial de versiones**. Las copias existentes no se renombran ni reparan
+  automáticamente al iniciar el script.
+
+Cada copia tiene un archivo `.meta.json` asociado con datos como su origen,
+fechas, número de copias, tamaño y SHA-256. El índice no muestra estos
+archivos de metadatos como documentos.
+
+## Archivos y directorios
+
+Por defecto, los datos se encuentran en `~/Documents/NPP`. Todos los archivos
+de datos, incluida la configuración y el protocolo, se guardan en el
+directorio base activo. Con la configuración predeterminada, la estructura es:
 
 ```text
-C:\Users\YourName\Documents\NPP\config.txt
+~/Documents/NPP/
+├── config.txt                   Configuración
+├── index.html                   Índice para el navegador
+├── autosave.log                 Registro de actividad y errores
+├── _backup/                     Copias actuales y archivos .meta.json
+├── _old/                        Archivos antiguos, si los hay
+├── _meta/
+│   └── stats.json               Estadísticas
+└── _protocol/                   Instalado al ejecutar OpenAutosaveIndex
+    ├── OpenAutosaveFile.ps1
+    └── settings.json
 ```
 
-`config.txt` remains at that fixed location so the script can find it before
-knowing which data directory to use. All other files go to `base_dir`.
+Junto a los scripts de PythonScript se crea `.autosave-base-dir`, un archivo
+que contiene únicamente la ruta del directorio activo para localizar la
+configuración al arrancar.
 
-ini
+`_old` se incluye en el índice para consultar archivos existentes, pero el
+script no archiva allí automáticamente las copias actuales.
 
-# Base directory for external copies, log, index, and statistics
-# Accepts absolute paths, ~, environment variables, or a path relative to
-# the directory containing config.txt.
-base_dir = D:\NPP-Autosave
+## Configuración
 
-# Seconds after typing stops to save active tab
+El archivo `config.txt` está en el directorio base activo. Se crea con los
+valores predeterminados cuando Autosave lo necesita. Puedes abrirlo con
+`open_config()` desde la consola.
+
+```ini
+# Segundos sin actividad antes de copiar la pestaña editada
 idle_time = 10
 
-# Seconds between saving ALL tabs (300 = 5 minutes)
+# Segundos entre copias de las pestañas modificadas
 interval_time = 300
 
-# Show status in statusbar (true/false)
+# Directorio de datos; este ejemplo es el predeterminado
+base_dir = ~/Documents/NPP
+
+# Mensajes en la barra de estado
 show_statusbar = true
 
-# Theme for index.html (dark/light)
+# Tema inicial del índice: dark o light
 theme = dark
-🎯 Console Commands
-Open console: Plugins → PythonScript → Show Console
+```
 
-Command	Description
-manual_save()	Create an external copy of the active tab
-manual_save_all()	Create external copies of all modified tabs
-manual_force_save_all()	Force an external copy of every open tab
-open_index()	Open index in browser
-open_config()	Open config file
-open_folder()	Open NPP folder in Explorer
-_autosaver.stop()	Stop autosave
-_autosaver.start()	Restart autosave
-📊 HTML Index
-Open index.html in your browser to access:
+`idle_time` tiene un mínimo de un segundo e `interval_time`, de 60 segundos.
+`base_dir` admite rutas absolutas, `~`, variables de entorno y rutas relativas
+al directorio que contiene `config.txt`. El botón del índice permite cambiar el
+tema en el navegador.
 
-🔍 Full-text search across file names, original paths, and copy contents
-🔎 Search operators:
-  - `contenido:factura`
-  - `ruta:"D:\Proyectos Cliente"`
-  - `nombre:informe`
-  - `ext:.py`
-  - `desde:2026-11-01`
-  - `hasta:2026-11-25`
-  - Combine filters, for example:
-    `contenido:error ruta:"C:\Proyecto" ext:.log desde:2026-11-01`
-🌓 Theme Toggle - Dark/Light mode
-🔗 Quick Links - Click to open any file
-📈 Statistics - View save activity
-📁 Sections - Documents / Backups / Archive
+### Cambiar el directorio base
 
-Search previews show the matching content and highlight the first match. Up to
-500,000 characters per file are embedded in the HTML index to keep it
-manageable.
+1. Abre `config.txt` con `open_config()`, modifica `base_dir` y guarda el
+   archivo.
+2. Reinicia Notepad++ o vuelve a cargar Autosave. El cambio no se aplica hasta
+   ese momento.
+3. Autosave copia el contenido del directorio anterior al nuevo, incluidos
+   configuración, copias, estadísticas y protocolo. **Los archivos existentes
+   con el mismo nombre en el destino se sobrescriben.** El origen se conserva.
+4. Una vez copiados los archivos, se actualizan el protocolo instalado y el
+   localizador. La ruta de `base_dir` en la nueva configuración se guarda como
+   ruta absoluta.
 
-### Search in the browser, open copies in Notepad++
+Si la migración falla, se muestra un error y el directorio anterior permanece
+activo. El destino puede contener archivos ya copiados o sobrescritos; corrige
+el error y vuelve a cargar Autosave para reintentar. El destino no puede ser un
+directorio que contenga al origen. Si está dentro del origen, se excluye el
+propio destino de la copia para evitar recursión. Los enlaces simbólicos no se
+migran.
 
-Preview HTML is no longer needed. Update [Autosave.py](./Autosave.py), then
-place [OpenAutosaveIndex.py](./OpenAutosaveIndex.py) and
-[OpenAutosaveFile.ps1](./OpenAutosaveFile.ps1) together in your PythonScript
-scripts directory.
+Al actualizar desde una versión anterior con un `base_dir` personalizado, los
+datos ya existentes permanecen en ese directorio; se trasladan allí la
+configuración y el protocolo que antes estaban en `~/Documents/NPP`. Ejecuta
+la versión actualizada una vez antes de modificar `base_dir`.
 
-1. Restart Notepad++ (or reload Autosave) to regenerate the index with
-   `npp-autosave:` links.
-2. Run **Plugins > PythonScript > Scripts > OpenAutosaveIndex**.
-3. Search in the default browser and click a filename. Allow the browser to
-   open the external application when prompted.
+## Índice HTML y búsqueda
 
-The opener reads the same `config.txt` / `base_dir`. It installs a small
-PowerShell handler and its settings in `~/Documents/NPP/_protocol` and registers
-`HKEY_CURRENT_USER\Software\Classes\npp-autosave`. No administrator rights,
-Preview HTML, external Python installation, or running server are required.
-PythonScript's Python 2 and Python 3 editions are supported.
+El índice contiene las secciones **Copias** (`_backup`) y **Archivo** (`_old`),
+además de estadísticas y enlaces a la configuración, el registro y la carpeta
+de datos. Autosave genera el índice al arrancar y lo actualiza al procesar
+copias; recarga la página del navegador para ver los cambios.
 
-Each result opens the **backup copy**, not the original. Notepad++ handles
-already-open files normally and is launched if it is closed. The handler uses
-the executable of the Notepad++ installation that ran the opener. It accepts
-only encoded filenames directly inside the configured `_backup` or `_old`
-folder; path traversal, metadata sidecars, and symbolic links are rejected.
-Windows cloud placeholders (including OneDrive) are allowed: their
-`ReparsePoint` attribute is not, on its own, evidence of a symbolic link. The
-handler checks the Windows reparse tag, allowing cloud placeholders while
-rejecting symbolic links, junctions, and unrecognized reparse types.
-Filenames are passed as a quoted argument, never as a shell command.
+La búsqueda no distingue mayúsculas de minúsculas. Sin operador, busca en el
+nombre, la ruta original y el contenido. Puedes combinar términos: todos deben
+coincidir. Usa comillas para valores con espacios.
 
-The opener registers the protocol before opening the existing index; it does
-not restart Autosave or regenerate the HTML. Rerun it after changing `base_dir`
-or moving Notepad++, and after updating `OpenAutosaveFile.ps1` so its installed
-copy is refreshed. The `open_index()` console command still opens the browser
-but does not perform protocol registration.
+| Operador | Ejemplo | Busca en |
+| --- | --- | --- |
+| `contenido:` | `contenido:factura` | Contenido de la copia. |
+| `nombre:` | `nombre:informe` | Nombre de la copia o nombre original. |
+| `ruta:` | `ruta:"D:\Proyectos Cliente"` | Ruta original. |
+| `ext:` | `ext:.py` | Extensión. |
+| `desde:` | `desde:2026-11-01` | Fecha de actualización, inclusive. |
+| `hasta:` | `hasta:2026-11-25` | Fecha de actualización, inclusive. |
 
-The handler uses Windows PowerShell with a process-local `RemoteSigned` policy;
-it does not change the stored execution policy. If organizational policies
-block PowerShell or custom protocols, ask your administrator rather than
-disabling those policies. A console window may briefly appear when opening a
-copy. Handler errors are shown in a dialog.
+Ejemplo combinado:
 
-To uninstall the protocol, delete only
-`HKEY_CURRENT_USER\Software\Classes\npp-autosave` in Registry Editor. The
-`~/Documents/NPP/_protocol` folder can then be removed without deleting backups.
+```text
+contenido:error ruta:"C:\Proyecto" ext:.log desde:2026-11-01
+```
 
-🐛 Troubleshooting
-Script not loading
-Check: Plugins → PythonScript → Configuration
-Verify autosave.py is listed
-Verify ATSTARTUP is selected
-Restart Notepad++
-Files not saving
-Check folder permissions:
+Las fechas usan el formato `AAAA-MM-DD`. Cuando coincide el contenido, se
+muestra un fragmento con el término resaltado. Se incluyen en el índice como
+máximo los primeros 500.000 caracteres de cada archivo, por lo que la búsqueda
+no encuentra texto situado después de ese límite. El índice contiene texto de
+las copias: trátalo como información privada.
 
-text
+### Abrir una copia en Notepad++
 
-C:\Users\YourName\Documents\NPP\
-Find your files
-Run in console:
+1. Ejecuta `OpenAutosaveIndex` desde el menú de scripts de PythonScript.
+2. Busca un archivo en el índice abierto en el navegador y haz clic en su
+   nombre. Autoriza la apertura de la aplicación externa si se solicita.
 
-Python
+Se abre **la copia**, no el archivo original. El lanzador utiliza el
+`notepad++.exe` de la instalación que ejecutó `OpenAutosaveIndex`. Este script
+abre el índice existente: no inicia Autosave ni regenera el índice. Si no
+existe, ejecuta primero `Autosave`.
 
-open_folder()
+El lanzador copia el script PowerShell y su configuración a `_protocol` dentro
+del directorio base y
+registra `npp-autosave:` en `HKEY_CURRENT_USER\Software\Classes`, sin
+necesidad de administrador ni cambios en las asociaciones de archivos. Vuelve
+a ejecutar `OpenAutosaveIndex` después de mover Notepad++ o actualizar
+`OpenAutosaveFile.ps1`. Al cambiar `base_dir`, Autosave actualiza el protocolo
+ya instalado durante la migración.
 
-Changing `base_dir` takes effect after restarting Notepad++ or reloading the
-script. Existing files are not moved automatically.
-📜 Changelog
-Unreleased
-✅ Existing files are copied to the backup folder without changing originals
-✅ Backup names include a stable source identifier and preserve the extension
-✅ Editor buffers remain marked as modified after backup
-v1.2.0
-✅ Dual save mode (original location vs NPP folder)
-✅ Interval save for all tabs every 5 minutes
-✅ Improved file detection
-✅ Dynamic copyright year
-v1.1.0
-✅ Idle-based autosave
-✅ HTML index with search
-✅ Statistics tracking
-✅ Dark/Light theme
-✅ One current external copy per document
-v1.0.0
-✅ Initial release
-📄 License
-This project is licensed under the MIT License.
+Por seguridad, el manejador solo admite nombres de archivos directamente en
+`_backup` o `_old`; rechaza rutas externas, metadatos, enlaces simbólicos,
+uniones de directorios y tipos de enlace desconocidos. Admite marcadores de
+archivos en la nube reconocidos, como los de OneDrive. Windows PowerShell se
+ejecuta con la política `RemoteSigned` para ese proceso, sin cambiar la
+política guardada del sistema. Los errores se muestran en un cuadro de diálogo.
 
-text
+Para eliminar el registro del protocolo, borra la clave
+`HKEY_CURRENT_USER\Software\Classes\npp-autosave` del registro de Windows.
+Después puedes eliminar `_protocol` del directorio base; esto no elimina las
+copias.
 
-MIT License
+## Comandos de consola
 
-Copyright (c) 2026 Rickard Längkvist
+Abre **Plugins > PythonScript > Show Console**. Si has cargado el script
+mediante `import Autosave` en `startup.py`, usa los comandos con el prefijo
+`Autosave.`; por ejemplo, `Autosave.manual_save()`. Si lo ejecutaste desde el
+menú de scripts, utiliza los nombres mostrados en la tabla.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software.
-👤 Author
-Rickard Längkvist
+| Comando | Función |
+| --- | --- |
+| `manual_save()` | Copia la pestaña activa si está modificada. |
+| `manual_save_all()` | Procesa todas las pestañas modificadas. |
+| `manual_force_save_all()` | Fuerza la copia de todas las pestañas abiertas, incluso las no modificadas o vacías. |
+| `open_index()` | Regenera y abre el índice; no registra el protocolo. |
+| `open_config()` | Abre `config.txt` en Notepad++. |
+| `open_folder()` | Abre el directorio de datos en el Explorador. |
+| `_autosaver.stop()` | Detiene la supervisión automática. |
+| `_autosaver.start()` | Reinicia la supervisión automática. |
 
-GitHub: @Tokke2
-🔗 Links
-📦 Repository
-🐛 Issues
-📥 Releases
-⭐ Support
-If you find this project useful, please give it a star!
+## Solución de problemas
 
-Star
+- **Autosave no se inicia:** comprueba que PythonScript esté instalado, que
+  `Autosave.py` esté en su carpeta de scripts y que `startup.py` y
+  `ATSTARTUP` estén configurados si quieres iniciarlo automáticamente.
+- **No aparece una copia:** verifica que la pestaña esté modificada, espera el
+  tiempo configurado y revisa `autosave.log` y la consola de PythonScript.
+  Comprueba también los permisos de escritura del directorio de datos.
+- **El índice no existe:** ejecuta Autosave primero. `OpenAutosaveIndex` no lo
+  genera por sí mismo.
+- **El enlace no abre la copia:** vuelve a ejecutar `OpenAutosaveIndex`,
+  comprueba que ambos scripts de apertura estén juntos y acepta la solicitud
+  del navegador. Si una política de la organización bloquea PowerShell o los
+  protocolos personalizados, consulta con el administrador.
+- **Ha fallado el cambio de `base_dir`:** revisa el mensaje de error y los
+  permisos de ambos directorios y de la carpeta de scripts. El directorio
+  anterior se conserva y el destino puede contener una copia parcial.
 
-🤝 Contributing
-Contributions are welcome!
+## Licencia y atribución
 
-Fork the project
-Create your feature branch (git checkout -b feature/AmazingFeature)
-Commit your changes (git commit -m 'Add some AmazingFeature')
-Push to the branch (git push origin feature/AmazingFeature)
-Open a Pull Request
+Distribuido bajo la [licencia MIT](./LICENSE). Copyright © 2026 icuefue.
+El script conserva la atribución original a Rickard Längkvist.
