@@ -35,10 +35,7 @@ import hashlib
 import os
 import io
 import json
-import re
-import shutil
 import sys
-import tempfile
 import time
 from datetime import datetime
 
@@ -532,73 +529,6 @@ def get_untitled_copy_name(buffer_id, text, index):
         name = get_backup_name(identity, timestamp)
         _untitled_copy_names[buffer_id] = available_copy_name(BACKUP_DIR, name, u".txt")
     return _untitled_copy_names[buffer_id]
-
-
-def migrate_untitled_copies(directory):
-    """Rename identified untitled copies using their recorded first-copy time."""
-    if not os.path.isdir(directory):
-        return
-    try:
-        filenames = os.listdir(directory)
-    except OSError as e:
-        log(u"No se pudo examinar {} para renombrar copias: {}".format(directory, e), "ERROR")
-        return
-    for filename in filenames:
-        if filename.endswith(".meta.json"):
-            continue
-        copy_path = os.path.join(directory, filename)
-        if not os.path.isfile(copy_path):
-            continue
-        metadata_path = copy_path + ".meta.json"
-        if not os.path.isfile(metadata_path):
-            continue
-        metadata = load_copy_metadata(copy_path)
-        if not isinstance(metadata, dict):
-            log(u"Metadatos no válidos para {}: se conserva la copia".format(copy_path), "ERROR")
-            continue
-        if metadata.get("source_type") != "untitled_buffer":
-            continue
-        name, extension = os.path.splitext(filename)
-        if re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_[0-9a-f]{8}(?:_\d+)?$", name):
-            continue
-        try:
-            created = datetime.strptime(metadata["created_at"][:19], "%Y-%m-%dT%H:%M:%S")
-            timestamp = created.strftime("%Y-%m-%d_%H-%M-%S")
-            new_name = available_copy_name(
-                directory, get_backup_name(copy_path, timestamp), extension
-            )
-            new_path = os.path.join(directory, new_name + extension)
-            new_metadata_path = new_path + ".meta.json"
-            metadata["copy_name"] = os.path.basename(new_path)
-            metadata["copy_path"] = os.path.abspath(new_path)
-            content = json.dumps(metadata, ensure_ascii=False, indent=2)
-            if not isinstance(content, text_type):
-                content = content.decode("utf-8")
-
-            created_paths = []
-            try:
-                fd = os.open(new_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-                created_paths.append(new_path)
-                with os.fdopen(fd, "wb") as target:
-                    with io.open(copy_path, "rb") as source:
-                        shutil.copyfileobj(source, target)
-                fd = os.open(new_metadata_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-                created_paths.append(new_metadata_path)
-                with io.open(fd, "w", encoding="utf-8") as target:
-                    target.write(content)
-            except Exception:
-                for path in reversed(created_paths):
-                    try:
-                        os.remove(path)
-                    except OSError as cleanup_error:
-                        log(u"No se pudo limpiar {}: {}".format(path, cleanup_error), "ERROR")
-                raise
-
-            os.remove(copy_path)
-            os.remove(metadata_path)
-            log(u"Copia sin guardar renombrada: {} -> {}".format(filename, os.path.basename(new_path)))
-        except Exception as e:
-            log(u"No se pudo renombrar la copia {}: {}".format(copy_path, e), "ERROR")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1465,128 +1395,6 @@ def manual_force_save_all():
         log(u"No se pudo copiar ninguna pestaña. Revisa autosave.log.", "ERROR")
 
 
-def replace_repair_file(source, destination):
-    """Replace a repaired file atomically on PythonScript's Python 2 and 3."""
-    if os.name == "nt":
-        move_file = ctypes.windll.kernel32.MoveFileExW
-        move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
-        move_file.restype = ctypes.c_int
-        if not move_file(filesystem_text(source), filesystem_text(destination), 0x9):  # REPLACE_EXISTING | WRITE_THROUGH
-            raise ctypes.WinError()
-    else:
-        os.rename(source, destination)
-
-
-def repair_copy_newlines(aggressive=False):
-    """Repair verified bytes, or explicitly collapse runs of 3+ line breaks."""
-    def collapse_run(match):
-        run = match.group(0)
-        if len(run.replace(b"\r\n", b"\n")) < 3:
-            return run
-        return b"\r\n" if run.startswith(b"\r\n") else run[:1]
-
-    if aggressive:
-        log(u"Reparación agresiva: se reducirán 3 o más saltos de línea a uno, sin verificar el SHA-256 previo.", "WARNING")
-    repaired = 0
-    for directory in (BACKUP_DIR, OLD_DIR):
-        directory = filesystem_text(directory)
-        try:
-            filenames = os.listdir(directory)
-        except OSError as e:
-            log(u"No se pudieron examinar las copias de {}: {}".format(directory, e), "ERROR")
-            continue
-        for filename in filenames:
-            copy_path = os.path.join(directory, filename)
-            if filename.endswith(".meta.json") or not os.path.isfile(copy_path):
-                continue
-            temporary = None
-            metadata_temporary = None
-            try:
-                if os.path.islink(copy_path):
-                    raise ValueError(u"No se reparan enlaces simbólicos")
-                metadata = load_copy_metadata(copy_path)
-                expected_hash = metadata.get("sha256") if isinstance(metadata, dict) else None
-                if not aggressive and not expected_hash:
-                    log(u"Sin SHA-256 verificable; copia intacta: {}".format(copy_path), "WARNING")
-                    continue
-                original_stat = os.stat(copy_path)
-                with io.open(copy_path, "rb") as source:
-                    damaged = source.read()
-                updated_metadata = None
-                if aggressive:
-                    restored = re.sub(b"(?:\r\n|[\r\n])+", collapse_run, damaged)
-                    if restored == damaged:
-                        continue
-                    restored_text = restored.decode("utf-8")
-                    updated_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-                    updated_metadata.update({
-                        "sha256": hashlib.sha256(restored).hexdigest(),
-                        "size_bytes": len(restored),
-                        "character_count": len(restored_text),
-                        "line_count": len(restored_text.splitlines()),
-                        "encoding": "utf-8",
-                        "newline_repaired_at": datetime.now().isoformat(),
-                    })
-                else:
-                    if hashlib.sha256(damaged).hexdigest() == expected_hash:
-                        continue
-                    restored = damaged.replace(b"\r\n", b"\n")
-                    if hashlib.sha256(restored).hexdigest() != expected_hash:
-                        log(u"No se pudo verificar la reparación; copia intacta: {}".format(copy_path), "WARNING")
-                        continue
-
-                backup_root = os.path.join(META_DIR, "newline_repairs")
-                if not os.path.isdir(backup_root):
-                    os.makedirs(backup_root)
-                backup_dir = tempfile.mkdtemp(prefix="copy-", dir=backup_root)
-                shutil.copy2(copy_path, os.path.join(backup_dir, filename))
-                metadata_path = copy_path + ".meta.json"
-                if os.path.isfile(metadata_path):
-                    shutil.copy2(metadata_path, os.path.join(backup_dir, filename + ".meta.json"))
-
-                fd, temporary = tempfile.mkstemp(prefix=".newline-repair-", dir=directory)
-                with os.fdopen(fd, "wb") as target:
-                    target.write(restored)
-                    target.flush()
-                    os.fsync(target.fileno())
-                os.utime(temporary, (original_stat.st_atime, original_stat.st_mtime))
-                if updated_metadata is not None:
-                    fd, metadata_temporary = tempfile.mkstemp(prefix=".newline-repair-", dir=META_DIR)
-                    with os.fdopen(fd, "wb") as target:
-                        target.write(json.dumps(updated_metadata, ensure_ascii=False, indent=2).encode("utf-8"))
-                        target.flush()
-                        os.fsync(target.fileno())
-                with io.open(copy_path, "rb") as source:
-                    if source.read() != damaged:
-                        raise RuntimeError(u"La copia cambió durante la reparación; no se sustituye")
-                if load_copy_metadata(copy_path) != metadata:
-                    raise RuntimeError(u"Los metadatos cambiaron durante la reparación; no se sustituye")
-                replace_repair_file(temporary, copy_path)
-                temporary = None
-                _copy_state.pop(copy_path, None)
-                repaired += 1
-                if metadata_temporary is not None:
-                    try:
-                        replace_repair_file(metadata_temporary, metadata_path)
-                        metadata_temporary = None
-                    except Exception as e:
-                        log(u"Contenido reparado, pero no se pudieron actualizar los metadatos de {}: {}".format(copy_path, e), "ERROR")
-                log(u"Copia reparada: {} | Respaldo previo: {}".format(copy_path, backup_dir))
-            except Exception as e:
-                log(u"No se pudo reparar {}: {}".format(copy_path, e), "ERROR")
-            finally:
-                for pending in (temporary, metadata_temporary):
-                    if pending is not None:
-                        try:
-                            os.remove(pending)
-                        except OSError as e:
-                            log(u"No se pudo eliminar el temporal {}: {}".format(pending, e), "ERROR")
-    if repaired:
-        generate_index()
-    log(u"Reparación de finales de línea: {} copias reparadas. Revisa autosave.log para ver los detalles.".format(repaired))
-    return repaired
-
-
 def open_index():
     """Open index in browser."""
     import subprocess
@@ -1792,9 +1600,6 @@ except NameError:
 except Exception:
     pass
 
-migrate_untitled_copies(BACKUP_DIR)
-migrate_untitled_copies(OLD_DIR)
-
 _autosaver = AutoSaver()
 _autosaver.start()
 
@@ -1816,8 +1621,6 @@ log(u"Comandos de copia:")
 log(u"  manual_save()            Copiar pestaña activa modificada")
 log(u"  manual_save_all()        Copiar todas las pestañas modificadas")
 log(u"  manual_force_save_all()  Forzar copia de todas las pestañas")
-log(u"  repair_copy_newlines()   Reparar copias verificadas con SHA-256")
-log(u"  repair_copy_newlines(aggressive=True)  Reducir 3+ saltos de línea a uno")
 log(u"Comandos de apertura:")
 log(u"  open_index()             Abrir índice HTML")
 log(u"  open_config()            Abrir config.txt")
