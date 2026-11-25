@@ -11,8 +11,9 @@
 ║  FEATURES:                                                       ║
 ║  - Saves active tab 10s after you stop typing                    ║
 ║  - Saves ALL tabs every 5 minutes                                ║
-║  - Already saved files: saves to original location               ║
-║  - New files: saves to NPP folder with line 1 as filename        ║
+║  - Keeps one current external copy per open document             ║
+║  - Original files remain unchanged and marked as modified        ║
+║  - New files: names copies using their first-copy timestamp      ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  INSTALLATION:                                                   ║
 ║  1. Save to: %APPDATA%/Notepad++/plugins/config/                 ║
@@ -27,14 +28,43 @@ __author__ = u"Rickard Längkvist"
 __license__ = "MIT"
 
 from Npp import notepad, editor, console, NOTIFICATION, STATUSBARSECTION
+import Npp
 import ctypes
+import binascii
 import hashlib
 import os
 import io
 import json
+import re
 import shutil
+import sys
+import tempfile
 import time
 from datetime import datetime
+
+text_type = type(u"")
+
+
+def get_modified_notification():
+    """Return the editor modification notification for this PythonScript version."""
+    for owner_name in ("SCINTILLANOTIFICATION", "NOTIFICATION"):
+        owner = getattr(Npp, owner_name, None)
+        if owner is None:
+            continue
+        for attribute_name in ("MODIFIED", "SCN_MODIFIED"):
+            notification = getattr(owner, attribute_name, None)
+            if notification is not None:
+                return notification
+    raise AttributeError(
+        "PythonScript no expone la notificación MODIFIED de Scintilla"
+    )
+
+
+try:
+    MODIFIED_NOTIFICATION = get_modified_notification()
+except AttributeError:
+    MODIFIED_NOTIFICATION = None
+
 
 try:
     from html import escape as _html_escape        # Python 3
@@ -65,14 +95,65 @@ def file_url(path):
     return u"file:///" + _url_quote(p, safe=":/")
 
 
+def filesystem_text(path):
+    """Keep filesystem bytes distinct from UTF-8 bytes returned by Npp."""
+    if isinstance(path, bytes):
+        return path.decode(sys.getfilesystemencoding())
+    return path
+
+
+def copy_url(path):
+    """Address only a backup filename, never an executable or arbitrary path."""
+    path = filesystem_text(path)
+    directory = os.path.normcase(os.path.abspath(os.path.dirname(path)))
+    folders = (
+        (BACKUP_DIR, "backup"),
+        (OLD_DIR, "old"),
+    )
+    for folder, bucket in folders:
+        if directory == os.path.normcase(os.path.abspath(filesystem_text(folder))):
+            name = os.path.basename(path).encode("utf-8")
+            return u"npp-autosave:{}/{}".format(
+                bucket, binascii.hexlify(name).decode("ascii")
+            )
+    raise ValueError(u"La ruta no es una copia de Autosave: {}".format(path))
+
+
 # ══════════════════════════════════════════════════════════════════
 # SETTINGS
 # ══════════════════════════════════════════════════════════════════
-BASE_DIR = os.path.expanduser("~/Documents/NPP")
+CONFIG_DIR = os.path.expanduser("~/Documents/NPP")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.txt")
+DEFAULT_BASE_DIR = CONFIG_DIR
+
+
+def get_configured_base_dir():
+    """Read the base directory before the remaining settings are available."""
+    configured_path = DEFAULT_BASE_DIR
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with io.open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    if key.strip().lower() == "base_dir":
+                        configured_path = value.strip().strip(u"'\"")
+                        break
+    except Exception:
+        configured_path = DEFAULT_BASE_DIR
+
+    configured_path = os.path.expandvars(os.path.expanduser(configured_path))
+    if not os.path.isabs(configured_path):
+        configured_path = os.path.join(CONFIG_DIR, configured_path)
+    return os.path.normpath(configured_path)
+
+
+BASE_DIR = get_configured_base_dir()
 BACKUP_DIR = os.path.join(BASE_DIR, "_backup")
 OLD_DIR = os.path.join(BASE_DIR, "_old")
 META_DIR = os.path.join(BASE_DIR, "_meta")
-CONFIG_FILE = os.path.join(BASE_DIR, "config.txt")
 LOG_FILE = os.path.join(BASE_DIR, "autosave.log")
 INDEX_FILE = os.path.join(BASE_DIR, "index.html")
 STATS_FILE = os.path.join(META_DIR, "stats.json")
@@ -80,16 +161,10 @@ STATS_FILE = os.path.join(META_DIR, "stats.json")
 DEFAULT_CONFIG = {
     "idle_time": 10,
     "interval_time": 300,
-    "max_backup_age_days": 30,
-    "max_backups_per_file": 50,
-    "show_notifications": False,
+    "base_dir": DEFAULT_BASE_DIR,
     "show_statusbar": True,
     "theme": "dark"
 }
-
-# Minimum seconds between two *different* backups of the same file.
-# Identical content is never backed up twice (see create_backup).
-MIN_BACKUP_INTERVAL = 60
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -97,12 +172,12 @@ MIN_BACKUP_INTERVAL = 60
 # ══════════════════════════════════════════════════════════════════
 def init_folders():
     """Create necessary folders."""
-    for d in [BASE_DIR, BACKUP_DIR, OLD_DIR, META_DIR]:
+    for d in [CONFIG_DIR, BASE_DIR, BACKUP_DIR, OLD_DIR, META_DIR]:
         if not os.path.exists(d):
             try:
                 os.makedirs(d)
             except Exception as e:
-                console.write("Could not create folder {}: {}\n".format(d, e))
+                console.write(u"No se pudo crear el directorio {}: {}\n".format(d, e))
 
 init_folders()
 
@@ -141,26 +216,22 @@ def create_default_config():
     try:
         with io.open(CONFIG_FILE, "w", encoding="utf-8") as f:
             f.write(u"# ══════════════════════════════════════════════════════════\n")
-            f.write(u"# NPP Autosave Configuration v{}\n".format(__version__))
+            f.write(u"# Configuración de NPP Autosave v{}\n".format(__version__))
             f.write(u"# © {} {}\n".format(datetime.now().year, __author__))
             f.write(u"# ══════════════════════════════════════════════════════════\n\n")
-            f.write(u"# Seconds after last keypress to save ACTIVE tab\n")
+            f.write(u"# Segundos desde la última edición para copiar la pestaña activa\n")
             f.write(u"idle_time = {}\n\n".format(DEFAULT_CONFIG["idle_time"]))
-            f.write(u"# Seconds between saving ALL tabs (300 = 5 minutes)\n")
+            f.write(u"# Segundos entre copias de TODAS las pestañas (300 = 5 minutos)\n")
             f.write(u"interval_time = {}\n\n".format(DEFAULT_CONFIG["interval_time"]))
-            f.write(u"# Move backups older than X days to _old folder\n")
-            f.write(u"max_backup_age_days = {}\n\n".format(DEFAULT_CONFIG["max_backup_age_days"]))
-            f.write(u"# Maximum number of backups per file\n")
-            f.write(u"max_backups_per_file = {}\n\n".format(DEFAULT_CONFIG["max_backups_per_file"]))
-            f.write(u"# Show popup notification on save (true/false)\n")
-            f.write(u"show_notifications = {}\n\n".format(str(DEFAULT_CONFIG["show_notifications"]).lower()))
-            f.write(u"# Show save status in statusbar (true/false)\n")
+            f.write(u"# Directorio base para copias, registro, índice y estadísticas\n")
+            f.write(u"base_dir = {}\n\n".format(DEFAULT_CONFIG["base_dir"]))
+            f.write(u"# Mostrar el estado en la barra de estado (true/false)\n")
             f.write(u"show_statusbar = {}\n\n".format(str(DEFAULT_CONFIG["show_statusbar"]).lower()))
-            f.write(u"# Theme for index.html (dark/light)\n")
+            f.write(u"# Tema de index.html (dark/light)\n")
             f.write(u"theme = {}\n".format(DEFAULT_CONFIG["theme"]))
-        log(u"Config created: {}".format(CONFIG_FILE))
+        log(u"Configuración creada: {}".format(CONFIG_FILE))
     except Exception as e:
-        log(u"Could not create config: {}".format(e), "ERROR")
+        log(u"No se pudo crear la configuración: {}".format(e), "ERROR")
 
 
 def get_config_value(key, default=None):
@@ -210,9 +281,10 @@ def get_interval_time():
 
 
 # ══════════════════════════════════════════════════════════════════
-# STATUSBAR & NOTIFICATIONS
+# STATUSBAR
 # ══════════════════════════════════════════════════════════════════
 last_save_time = None
+last_save_result = None
 
 def update_statusbar(message):
     """Update Notepad++ statusbar."""
@@ -220,16 +292,6 @@ def update_statusbar(message):
         return
     try:
         notepad.setStatusBar(STATUSBARSECTION.DOCTYPE, message)
-    except Exception:
-        pass
-
-
-def show_notification(title, message):
-    """Show popup notification."""
-    if not get_config_value("show_notifications", False):
-        return
-    try:
-        notepad.messageBox(message, title, 0)
     except Exception:
         pass
 
@@ -274,9 +336,8 @@ def is_file_saved(filepath):
     Notepad++ returns an absolute path (e.g. "C:\\...") for files that have
     been saved once, and a short relative name ("new 1") for untitled buffers.
     Using os.path.isabs() instead of os.path.exists() means that if a file is
-    deleted or moved while it is open, autosave keeps writing to the ORIGINAL
-    location (recreating the file) instead of silently redirecting new saves
-    to the NPP folder under a different name.
+    deleted or moved while it is open, autosave keeps using that path as the
+    stable identity of the backup. It never recreates or changes the original.
     """
     if not filepath:
         return False
@@ -308,10 +369,13 @@ def load_stats():
 def save_stats(stats):
     """Save statistics to file."""
     try:
+        content = json.dumps(stats, ensure_ascii=False, indent=2)
+        if not isinstance(content, text_type):
+            content = content.decode("utf-8")
         with io.open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(stats, f, ensure_ascii=False, indent=2)
+            f.write(content)
     except Exception as e:
-        log(u"Could not save stats: {}".format(e), "ERROR")
+        log(u"No se pudieron guardar las estadísticas: {}".format(e), "ERROR")
 
 
 def update_stats(filename, size):
@@ -336,103 +400,205 @@ def update_stats(filename, size):
         save_stats(stats)
         
     except Exception as e:
-        log(u"Could not update stats: {}".format(e), "ERROR")
+        log(u"No se pudieron actualizar las estadísticas: {}".format(e), "ERROR")
 
 
 # ══════════════════════════════════════════════════════════════════
 # BACKUP MANAGEMENT
 # ══════════════════════════════════════════════════════════════════
-# name -> (content_hash, timestamp of last actual backup write)
-_backup_state = {}
+# Stable copy path -> content hash
+_copy_state = {}
+_untitled_copy_names = {}
+MAX_SEARCH_CHARS_PER_FILE = 500000
 
 
-def move_old_backups():
-    """Move old backups to _old folder."""
+def load_copy_metadata(copy_path):
+    """Load metadata associated with an external copy."""
+    metadata_path = copy_path + ".meta.json"
+    if not os.path.exists(metadata_path):
+        return {}
     try:
-        max_age = get_config_value("max_backup_age_days", DEFAULT_CONFIG["max_backup_age_days"])
-        cutoff = time.time() - (max_age * 86400)
-        moved = 0
-
-        for filename in os.listdir(BACKUP_DIR):
-            filepath = os.path.join(BACKUP_DIR, filename)
-            
-            if not os.path.isfile(filepath):
-                continue
-            
-            if os.path.getmtime(filepath) < cutoff:
-                dest = os.path.join(OLD_DIR, filename)
-                
-                if os.path.exists(dest):
-                    name, ext = os.path.splitext(filename)
-                    dest = os.path.join(OLD_DIR, "{}_{:%H%M%S%f}{}".format(name, datetime.now(), ext))
-                
-                shutil.move(filepath, dest)
-                moved += 1
-
-        if moved > 0:
-            log(u"Moved {} backups to _old".format(moved))
-            
+        with io.open(metadata_path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-        log(u"Error moving backups: {}".format(e), "ERROR")
+        log(u"No se pudieron leer los metadatos de {}: {}".format(copy_path, e), "WARNING")
+        return {}
 
 
-def limit_backups(name):
-    """Limit number of backups per file."""
-    try:
-        max_count = get_config_value("max_backups_per_file", DEFAULT_CONFIG["max_backups_per_file"])
-        prefix = name + "_"
-        
-        files = []
-        for filename in os.listdir(BACKUP_DIR):
-            if filename.startswith(prefix) and filename.endswith(".txt"):
-                filepath = os.path.join(BACKUP_DIR, filename)
-                files.append((os.path.getmtime(filepath), filepath, filename))
-        
-        if len(files) > max_count:
-            files.sort()
-            for _, filepath, filename in files[:len(files) - max_count]:
-                dest = os.path.join(OLD_DIR, filename)
-                if os.path.exists(dest):
-                    name_part, ext = os.path.splitext(filename)
-                    dest = os.path.join(OLD_DIR, "{}_{:%H%M%S%f}{}".format(name_part, datetime.now(), ext))
-                shutil.move(filepath, dest)
-                
-    except Exception as e:
-        log(u"Error limiting backups: {}".format(e), "ERROR")
+def write_copy_metadata(copy_path, text, source_path=None, source_name=None,
+                        source_type="file", buffer_id=None):
+    """Write metadata beside a copy without altering its contents."""
+    metadata_path = copy_path + ".meta.json"
+    previous = load_copy_metadata(copy_path)
+    now = datetime.now().isoformat()
+    encoded_text = text.encode("utf-8")
+
+    created_at = previous.get("created_at")
+    if not created_at and os.path.exists(copy_path):
+        created_at = datetime.fromtimestamp(os.path.getctime(copy_path)).isoformat()
+    if not created_at:
+        created_at = now
+
+    original_modified_at = None
+    if source_path and os.path.exists(source_path):
+        original_modified_at = datetime.fromtimestamp(
+            os.path.getmtime(source_path)
+        ).isoformat()
+
+    metadata = {
+        "schema_version": 1,
+        "source_type": source_type,
+        "original_path": source_path,
+        "original_name": source_name,
+        "source_extension": os.path.splitext(source_name or copy_path)[1].lower(),
+        "buffer_id": buffer_id,
+        "copy_name": os.path.basename(copy_path),
+        "copy_path": os.path.abspath(copy_path),
+        "created_at": created_at,
+        "updated_at": now,
+        "original_modified_at": original_modified_at,
+        "copy_count": int(previous.get("copy_count", 0)) + 1,
+        "size_bytes": len(encoded_text),
+        "character_count": len(text),
+        "line_count": len(text.splitlines()) if text else 0,
+        "encoding": "utf-8",
+        "sha256": hashlib.sha256(encoded_text).hexdigest()
+    }
+
+    content = json.dumps(metadata, ensure_ascii=False, indent=2)
+    if not isinstance(content, text_type):
+        content = content.decode("utf-8")
+    with io.open(metadata_path, "w", encoding="utf-8") as f:
+        f.write(content)
 
 
-def create_backup(name, text):
-    """Create a backup copy of the file.
-
-    Skips the write when the content is identical to the last backup, and
-    throttles changed content to at most one backup per MIN_BACKUP_INTERVAL
-    seconds per file. This prevents backup spam (previously a new timestamped
-    copy was written on every idle save, i.e. every ~10 s while typing).
-    """
+def save_external_copy(directory, name, text, extension=u".txt", force=False,
+                       source_path=None, source_name=None, source_type="file",
+                       buffer_id=None):
+    """Create or update the single current external copy for a document."""
     try:
         digest = hashlib.md5(text.encode("utf-8")).hexdigest()
-        now = time.time()
-        prev = _backup_state.get(name)
+        copy_path = os.path.join(directory, name + extension)
 
-        if prev is not None:
-            prev_digest, prev_time = prev
-            if prev_digest == digest:
-                return                      # identical content – skip
-            if (now - prev_time) < MIN_BACKUP_INTERVAL:
-                return                      # too soon since last backup
+        if not force and _copy_state.get(copy_path) == digest:
+            return None
 
-        ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        backup_filename = u"{}_{}.txt".format(name, ts)
-        backup_path = os.path.join(BACKUP_DIR, backup_filename)
-
-        with io.open(backup_path, "w", encoding="utf-8") as f:
+        with io.open(copy_path, "w", encoding="utf-8", newline="") as f:
             f.write(text)
 
-        _backup_state[name] = (digest, now)
-        limit_backups(name)
+        try:
+            write_copy_metadata(
+                copy_path, text, source_path, source_name, source_type, buffer_id
+            )
+        except Exception as e:
+            log(
+                u"La copia se creó, pero no se pudieron guardar sus metadatos: {}".format(e),
+                "ERROR"
+            )
+
+        _copy_state[copy_path] = digest
+        return True
 
     except Exception as e:
-        log(u"Error creating backup: {}".format(e), "ERROR")
+        log(u"Error al crear la copia externa: {}".format(e), "ERROR")
+        return False
+
+
+def get_backup_name(filepath, fallback_name):
+    """Build a readable, collision-resistant backup name."""
+    identity = filepath or fallback_name
+    normalized = os.path.normcase(os.path.normpath(identity))
+    identity_hash = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    safe_name = sanitize_filename(fallback_name) or u"untitled"
+    return u"{}_{}".format(safe_name, identity_hash)
+
+
+def available_copy_name(directory, name, extension):
+    """Avoid overwriting a copy or its metadata when allocating a name."""
+    candidate = name
+    suffix = 2
+    while (os.path.lexists(os.path.join(directory, candidate + extension)) or
+           os.path.lexists(os.path.join(directory, candidate + extension + ".meta.json"))):
+        candidate = u"{}_{}".format(name, suffix)
+        suffix += 1
+    return candidate
+
+
+def get_untitled_copy_name(buffer_id, text, index):
+    """Keep one stable filename for each untitled buffer in this session."""
+    if buffer_id not in _untitled_copy_names:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        identity = u"untitled-buffer-{}".format(buffer_id)
+        name = get_backup_name(identity, timestamp)
+        _untitled_copy_names[buffer_id] = available_copy_name(BACKUP_DIR, name, u".txt")
+    return _untitled_copy_names[buffer_id]
+
+
+def migrate_untitled_copies(directory):
+    """Rename identified untitled copies using their recorded first-copy time."""
+    if not os.path.isdir(directory):
+        return
+    try:
+        filenames = os.listdir(directory)
+    except OSError as e:
+        log(u"No se pudo examinar {} para renombrar copias: {}".format(directory, e), "ERROR")
+        return
+    for filename in filenames:
+        if filename.endswith(".meta.json"):
+            continue
+        copy_path = os.path.join(directory, filename)
+        if not os.path.isfile(copy_path):
+            continue
+        metadata_path = copy_path + ".meta.json"
+        if not os.path.isfile(metadata_path):
+            continue
+        metadata = load_copy_metadata(copy_path)
+        if not isinstance(metadata, dict):
+            log(u"Metadatos no válidos para {}: se conserva la copia".format(copy_path), "ERROR")
+            continue
+        if metadata.get("source_type") != "untitled_buffer":
+            continue
+        name, extension = os.path.splitext(filename)
+        if re.match(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_[0-9a-f]{8}(?:_\d+)?$", name):
+            continue
+        try:
+            created = datetime.strptime(metadata["created_at"][:19], "%Y-%m-%dT%H:%M:%S")
+            timestamp = created.strftime("%Y-%m-%d_%H-%M-%S")
+            new_name = available_copy_name(
+                directory, get_backup_name(copy_path, timestamp), extension
+            )
+            new_path = os.path.join(directory, new_name + extension)
+            new_metadata_path = new_path + ".meta.json"
+            metadata["copy_name"] = os.path.basename(new_path)
+            metadata["copy_path"] = os.path.abspath(new_path)
+            content = json.dumps(metadata, ensure_ascii=False, indent=2)
+            if not isinstance(content, text_type):
+                content = content.decode("utf-8")
+
+            created_paths = []
+            try:
+                fd = os.open(new_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                created_paths.append(new_path)
+                with os.fdopen(fd, "wb") as target:
+                    with io.open(copy_path, "rb") as source:
+                        shutil.copyfileobj(source, target)
+                fd = os.open(new_metadata_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                created_paths.append(new_metadata_path)
+                with io.open(fd, "w", encoding="utf-8") as target:
+                    target.write(content)
+            except Exception:
+                for path in reversed(created_paths):
+                    try:
+                        os.remove(path)
+                    except OSError as cleanup_error:
+                        log(u"No se pudo limpiar {}: {}".format(path, cleanup_error), "ERROR")
+                raise
+
+            os.remove(copy_path)
+            os.remove(metadata_path)
+            log(u"Copia sin guardar renombrada: {} -> {}".format(filename, os.path.basename(new_path)))
+        except Exception as e:
+            log(u"No se pudo renombrar la copia {}: {}".format(copy_path, e), "ERROR")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -442,27 +608,48 @@ def scan_files(directory):
     """Scan files in a directory."""
     files = []
     try:
+        directory = filesystem_text(directory)
         if not os.path.exists(directory):
             return files
         
+        show_all_files = os.path.abspath(directory) in (
+            os.path.abspath(filesystem_text(BACKUP_DIR)),
+            os.path.abspath(filesystem_text(OLD_DIR))
+        )
         for filename in os.listdir(directory):
-            if not filename.endswith(".txt"):
+            if filename.endswith(".meta.json"):
+                continue
+            if not show_all_files and not filename.endswith(".txt"):
                 continue
                 
             filepath = os.path.join(directory, filename)
             if not os.path.isfile(filepath):
                 continue
             
+            metadata = load_copy_metadata(filepath)
+            search_content = u""
+            search_truncated = False
+            try:
+                with io.open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                    search_content = f.read(MAX_SEARCH_CHARS_PER_FILE + 1)
+                search_truncated = len(search_content) > MAX_SEARCH_CHARS_PER_FILE
+                search_content = search_content[:MAX_SEARCH_CHARS_PER_FILE]
+            except Exception as e:
+                log(u"No se pudo indexar el contenido de {}: {}".format(filepath, e), "WARNING")
+
             files.append({
                 "name": filename,
                 "path": filepath,
                 "mtime": os.path.getmtime(filepath),
-                "size": os.path.getsize(filepath)
+                "size": os.path.getsize(filepath),
+                "metadata": metadata,
+                "search_content": search_content,
+                "search_truncated": search_truncated
             })
         
         files.sort(key=lambda x: -x["mtime"])
     except Exception as e:
-        log(u"Error scanning {}: {}".format(directory, e), "ERROR")
+        log(u"Error al examinar {}: {}".format(directory, e), "ERROR")
     
     return files
 
@@ -482,13 +669,13 @@ def format_time_ago(timestamp):
     diff = time.time() - timestamp
     
     if diff < 60:
-        return "just nu"
+        return "ahora"
     elif diff < 3600:
-        return "{} min sedan".format(int(diff / 60))
+        return "hace {} min".format(int(diff / 60))
     elif diff < 86400:
-        return "{} tim sedan".format(int(diff / 3600))
+        return "hace {} h".format(int(diff / 3600))
     elif diff < 604800:
-        return "{} dagar sedan".format(int(diff / 86400))
+        return "hace {} días".format(int(diff / 86400))
     else:
         return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
 
@@ -499,17 +686,16 @@ def format_time_ago(timestamp):
 def generate_index():
     """Generate HTML index file."""
     try:
-        main_files = scan_files(BASE_DIR)
         backup_files = scan_files(BACKUP_DIR)
         old_files = scan_files(OLD_DIR)
         
         stats = load_stats()
-        total_size = sum(f["size"] for f in main_files + backup_files + old_files)
+        total_size = sum(f["size"] for f in backup_files + old_files)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         cutoff_7days = time.time() - (7 * 86400)
-        recent_files = [f for f in main_files if f["mtime"] > cutoff_7days]
-        largest_file = max(main_files, key=lambda x: x["size"]) if main_files else None
+        recent_files = [f for f in backup_files if f["mtime"] > cutoff_7days]
+        largest_file = max(backup_files, key=lambda x: x["size"]) if backup_files else None
         
         avg_per_day = 0
         if stats.get("saves_per_day"):
@@ -519,7 +705,7 @@ def generate_index():
         body_class = "light-mode" if theme == "light" else ""
         
         html = generate_html_content(
-            main_files, backup_files, old_files,
+            [], backup_files, old_files,
             stats, total_size, now, len(recent_files),
             largest_file, avg_per_day, body_class
         )
@@ -528,7 +714,7 @@ def generate_index():
             f.write(html)
         
     except Exception as e:
-        log(u"Error generating index: {}".format(e), "ERROR")
+        log(u"Error al generar el índice: {}".format(e), "ERROR")
 
 
 def generate_html_content(main_files, backup_files, old_files, stats, total_size, now, recent_count, largest_file, avg_per_day, body_class):
@@ -537,25 +723,59 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
     def file_rows(files):
         rows = u""
         for f in files:
-            url = escape_html(file_url(f["path"]))
+            url = escape_html(copy_url(f["path"]))
             date = datetime.fromtimestamp(f["mtime"]).strftime("%Y-%m-%d %H:%M")
             ago = format_time_ago(f["mtime"])
             size = format_size(f["size"])
             name = escape_html(f["name"])
-            name_lower = escape_html(f["name"].lower())
+            metadata = f.get("metadata") or {}
+            original_path = metadata.get("original_path") or ""
+            original_name = metadata.get("original_name") or ""
+            created_at = metadata.get("created_at") or ""
+            updated_at = metadata.get("updated_at") or ""
+            extension = metadata.get("source_extension") or os.path.splitext(original_name or f["name"])[1]
+            search_content = f.get("search_content") or u""
+            truncated_note = u" (contenido indexado hasta 500.000 caracteres)" if f.get("search_truncated") else u""
+            details = u"Origen: {} | Primera copia: {} | Última actualización: {}".format(
+                original_path or original_name or f["name"],
+                created_at or date,
+                updated_at or date
+            ) + truncated_note
+            details = escape_html(details)
             
             rows += u'''
-                <tr class="file-row" data-name="{}">
-                    <td><a href="{}" class="file-link">{}</a></td>
+                <tr class="file-row"
+                    data-name="{}"
+                    data-path="{}"
+                    data-extension="{}"
+                    data-date="{}"
+                    data-content="{}"
+                    title="{}">
+                    <td>
+                        <a href="{}" class="file-link">{}</a>
+                        <div class="match-snippet" hidden></div>
+                    </td>
                     <td class="size">{}</td>
                     <td class="date" title="{}">{}</td>
-                </tr>'''.format(name_lower, url, name, size, date, ago)
+                </tr>'''.format(
+                    escape_html(u"{} {}".format(f["name"], original_name)),
+                    escape_html(original_path),
+                    escape_html(extension),
+                    escape_html((updated_at or date)[:10]),
+                    escape_html(search_content),
+                    details,
+                    url,
+                    name,
+                    size,
+                    date,
+                    ago
+                )
         return rows
     
     current_year = datetime.now().year
     
     html = u'''<!DOCTYPE html>
-<html lang="sv">
+<html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -723,6 +943,21 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
         
         .file-link {{ color: var(--text-primary); text-decoration: none; }}
         .file-link:hover {{ color: var(--accent); text-decoration: underline; }}
+
+        .match-snippet {{
+            color: var(--text-secondary);
+            font-size: 0.78em;
+            line-height: 1.4;
+            margin-top: 5px;
+            max-width: 65vw;
+            white-space: pre-wrap;
+        }}
+        .match-snippet mark {{
+            background: #ffdf5d;
+            color: #222;
+            border-radius: 2px;
+            padding: 0 2px;
+        }}
         
         .size, .date {{ text-align: right; color: var(--text-secondary); font-size: 0.8em; white-space: nowrap; }}
         
@@ -748,83 +983,71 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
             <div class="logo">📁</div>
             <h1>NPP Autosave</h1>
             <div class="version">v{version}</div>
-            <div class="updated">Uppdaterad: {now}</div>
+            <div class="updated">Actualizado: {now}</div>
             <button class="theme-toggle" onclick="toggleTheme()">🌓</button>
         </header>
         
         <div class="stats">
             <div class="stat">
-                <div class="stat-num">{main_count}</div>
-                <div class="stat-label">Dokument</div>
-            </div>
-            <div class="stat">
                 <div class="stat-num">{backup_count}</div>
-                <div class="stat-label">Backups</div>
+                <div class="stat-label">Copias</div>
             </div>
             <div class="stat">
                 <div class="stat-num">{old_count}</div>
-                <div class="stat-label">Arkiv</div>
+                <div class="stat-label">Archivo</div>
             </div>
             <div class="stat">
                 <div class="stat-num">{total_size}</div>
-                <div class="stat-label">Storlek</div>
+                <div class="stat-label">Tamaño</div>
             </div>
             <div class="stat">
                 <div class="stat-num">{total_saves}</div>
-                <div class="stat-label">Sparningar</div>
+                <div class="stat-label">Copias realizadas</div>
             </div>
         </div>
         
         <div class="stats-panel">
-            <h3>📊 Statistik</h3>
+            <h3>📊 Estadísticas</h3>
             <div class="stats-grid">
                 <div>
-                    <div class="stats-item-label">Senaste 7 dagar</div>
-                    <div class="stats-item-value">{recent_count} filer</div>
+                    <div class="stats-item-label">Últimos 7 días</div>
+                    <div class="stats-item-value">{recent_count} archivos</div>
                 </div>
                 <div>
-                    <div class="stats-item-label">Snitt/dag</div>
-                    <div class="stats-item-value">{avg_per_day:.1f} sparningar</div>
+                    <div class="stats-item-label">Media diaria</div>
+                    <div class="stats-item-value">{avg_per_day:.1f} copias</div>
                 </div>
                 <div>
-                    <div class="stats-item-label">Största fil</div>
+                    <div class="stats-item-label">Archivo más grande</div>
                     <div class="stats-item-value">{largest_file}</div>
                 </div>
                 <div>
-                    <div class="stats-item-label">Total sparat</div>
+                    <div class="stats-item-label">Total copiado</div>
                     <div class="stats-item-value">{total_bytes_saved}</div>
                 </div>
             </div>
         </div>
         
         <div class="search">
-            <input type="text" id="search" placeholder="Sök filer..." oninput="filterFiles()">
+            <input type="text" id="search"
+                   placeholder="Buscar texto, nombre o ruta... Ej.: contenido:factura ext:.txt desde:2026-01-01"
+                   oninput="filterFiles()">
         </div>
         
         <main>
             <div class="section">
-                <div class="section-header main" onclick="toggleSection('main')">
-                    <span class="section-title">📄 Dokument</span>
-                    <span><span class="section-count">{main_count}</span> <span class="toggle-icon">▼</span></span>
-                </div>
-                <div class="section-content open" id="content-main">
-                    {main_content}
-                </div>
-            </div>
-            
-            <div class="section">
-                <div class="section-header backup collapsed" onclick="toggleSection('backup')">
-                    <span class="section-title">💾 Backup</span>
+                <div class="section-header backup" onclick="toggleSection('backup')">
+                    <span class="section-title">💾 Copias</span>
                     <span><span class="section-count">{backup_count}</span> <span class="toggle-icon">▼</span></span>
                 </div>
-                <div class="section-content" id="content-backup">
+                <div class="section-content open" id="content-backup">
                     {backup_content}
                 </div>
             </div>
             
             <div class="section">
                 <div class="section-header old collapsed" onclick="toggleSection('old')">
-                    <span class="section-title">📦 Arkiv</span>
+                    <span class="section-title">📦 Archivo</span>
                     <span><span class="section-count">{old_count}</span> <span class="toggle-icon">▼</span></span>
                 </div>
                 <div class="section-content" id="content-old">
@@ -833,12 +1056,12 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
             </div>
         </main>
         
-        <div class="no-results" id="no-results">😕 Inga filer matchade</div>
+        <div class="no-results" id="no-results">😕 No se encontraron archivos</div>
         
         <footer>
-            <a href="file:///{config}">⚙️ Config</a> | 
-            <a href="file:///{log}">📋 Logg</a> | 
-            <a href="file:///{folder}">📂 Öppna mapp</a>
+            <a href="file:///{config}">⚙️ Configuración</a> |
+            <a href="file:///{log}">📋 Registro</a> |
+            <a href="file:///{folder}">📂 Abrir carpeta</a>
             <br><br>
             NPP Autosave v{version} &copy; {year} {author}
         </footer>
@@ -861,14 +1084,110 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
             content.classList.toggle('open');
         }}
         
+        function normalizeSearch(value) {{
+            return (value || '').toLowerCase();
+        }}
+
+        function escapeRegExp(value) {{
+            var specialCharacters = String.fromCharCode(
+                123, 125, 40, 41, 124, 91, 93, 92
+            );
+            var pattern = new RegExp(
+                '[.*+?^$' + specialCharacters + ']',
+                'g'
+            );
+            return value.replace(pattern, '\\\\$&');
+        }}
+
+        function parseQuery(query) {{
+            var terms = [];
+            var re = /(?:[^\\s"]+|"[^"]*")+/g;
+            var pieces = query.match(re) || [];
+
+            pieces.forEach(function(piece) {{
+                var separator = piece.indexOf(':');
+                if (separator > 0) {{
+                    var key = normalizeSearch(piece.slice(0, separator));
+                    var value = piece.slice(separator + 1).replace(/^"|"$/g, '');
+                    if (['contenido', 'ruta', 'ext', 'nombre', 'desde', 'hasta'].indexOf(key) >= 0) {{
+                        terms.push({{ key: key, value: normalizeSearch(value) }});
+                        return;
+                    }}
+                }}
+                terms.push({{ key: 'cualquiera', value: normalizeSearch(piece.replace(/^"|"$/g, '')) }});
+            }});
+            return terms;
+        }}
+
+        function showSnippet(row, queryTerms) {{
+            var snippet = row.querySelector('.match-snippet');
+            var content = row.getAttribute('data-content') || '';
+            var normalizedContent = normalizeSearch(content);
+            var contentTerms = queryTerms
+                .filter(function(term) {{ return term.key === 'contenido' || term.key === 'cualquiera'; }})
+                .map(function(term) {{ return term.value; }})
+                .filter(Boolean);
+
+            if (!contentTerms.length) {{
+                snippet.hidden = true;
+                snippet.textContent = '';
+                return;
+            }}
+
+            var term = contentTerms.find(function(value) {{ return normalizedContent.indexOf(value) >= 0; }});
+            if (!term) {{
+                snippet.hidden = true;
+                snippet.textContent = '';
+                return;
+            }}
+
+            var position = normalizedContent.indexOf(term);
+            var start = Math.max(0, position - 100);
+            var end = Math.min(content.length, position + term.length + 180);
+            var preview = (start > 0 ? '…' : '') + content.slice(start, end) + (end < content.length ? '…' : '');
+            var escaped = preview
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            var escapedTerm = term
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            var regex = new RegExp('(' + escapeRegExp(escapedTerm) + ')', 'ig');
+            snippet.innerHTML = escaped.replace(regex, '<mark>$1</mark>');
+            snippet.hidden = false;
+        }}
+
+        function matchesTerm(row, term) {{
+            if (!term.value) return true;
+            var name = normalizeSearch(row.getAttribute('data-name'));
+            var path = normalizeSearch(row.getAttribute('data-path'));
+            var extension = normalizeSearch(row.getAttribute('data-extension'));
+            var date = row.getAttribute('data-date') || '';
+            var content = normalizeSearch(row.getAttribute('data-content'));
+
+            if (term.key === 'contenido') return content.indexOf(term.value) >= 0;
+            if (term.key === 'ruta') return path.indexOf(term.value) >= 0;
+            if (term.key === 'ext') return extension.indexOf(term.value) >= 0;
+            if (term.key === 'nombre') return name.indexOf(term.value) >= 0;
+            if (term.key === 'desde') return date >= term.value;
+            if (term.key === 'hasta') return date <= term.value;
+            return name.indexOf(term.value) >= 0 ||
+                path.indexOf(term.value) >= 0 ||
+                content.indexOf(term.value) >= 0;
+        }}
+
         function filterFiles() {{
-            var q = document.getElementById('search').value.toLowerCase();
+            var q = document.getElementById('search').value;
+            var terms = parseQuery(q);
             var rows = document.querySelectorAll('.file-row');
             var visible = 0;
             
             rows.forEach(function(row) {{
-                var match = row.getAttribute('data-name').includes(q);
+                var match = terms.every(function(term) {{ return matchesTerm(row, term); }});
                 row.style.display = match ? '' : 'none';
+                if (match) showSnippet(row, terms);
+                else row.querySelector('.match-snippet').hidden = true;
                 if (match) visible++;
             }});
             
@@ -894,11 +1213,11 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
         total_saves=stats.get("total_saves", 0),
         recent_count=recent_count,
         avg_per_day=avg_per_day,
-        largest_file=escape_html(largest_file["name"]) if largest_file else "N/A",
+        largest_file=escape_html(largest_file["name"]) if largest_file else "N/D",
         total_bytes_saved=format_size(stats.get("total_bytes_saved", 0)),
-        main_content=u"<table>{}</table>".format(file_rows(main_files)) if main_files else u'<div class="empty-state">Inga dokument än</div>',
-        backup_content=u"<table>{}</table>".format(file_rows(backup_files)) if backup_files else u'<div class="empty-state">Inga backups än</div>',
-        old_content=u"<table>{}</table>".format(file_rows(old_files)) if old_files else u'<div class="empty-state">Inga arkiv än</div>',
+        main_content=u"<table>{}</table>".format(file_rows(main_files)) if main_files else u'<div class="empty-state">Aún no hay documentos</div>',
+        backup_content=u"<table>{}</table>".format(file_rows(backup_files)) if backup_files else u'<div class="empty-state">Aún no hay copias</div>',
+        old_content=u"<table>{}</table>".format(file_rows(old_files)) if old_files else u'<div class="empty-state">Aún no hay archivos archivados</div>',
         config=escape_html(file_url(CONFIG_FILE)),
         log=escape_html(file_url(LOG_FILE)),
         folder=escape_html(file_url(BASE_DIR))
@@ -910,7 +1229,7 @@ def generate_html_content(main_files, backup_files, old_files, stats, total_size
 # ══════════════════════════════════════════════════════════════════
 # SAVE OPERATIONS
 # ══════════════════════════════════════════════════════════════════
-def save_buffer(buffer_id, index):
+def save_buffer(buffer_id, index, force=False):
     """Save a specific buffer."""
     current_buffer = None
     
@@ -921,7 +1240,7 @@ def save_buffer(buffer_id, index):
         notepad.activateBufferID(buffer_id)
         
         # Check if modified
-        if not editor.getModify():
+        if not force and not editor.getModify():
             return False
         
         # Get current file path
@@ -937,45 +1256,46 @@ def save_buffer(buffer_id, index):
         
         # An empty buffer is only skippable when it is a NEW (untitled) file.
         # Emptying an existing file is a valid edit that must be saved.
-        if not text and not saved:
+        if not force and not text and not saved:
             return False
         
         if saved:
-            # ═══ ALREADY SAVED FILE: Save to original location ═══
-            notepad.save()
-            
-            # Create backup
-            name = os.path.splitext(os.path.basename(filepath))[0]
-            create_backup(name, text)
-            
-            update_stats(os.path.basename(filepath), len(text))
-            log(u"Saved (original): {}".format(filepath))
+            # Existing files are backup-only: never modify the original.
+            filename = os.path.basename(filepath)
+            name, extension = os.path.splitext(filename)
+            backup_name = get_backup_name(filepath, name)
+            copy_created = save_external_copy(
+                BACKUP_DIR, backup_name, text, extension or u".txt", force=force,
+                source_path=filepath, source_name=filename,
+                source_type="file", buffer_id=buffer_id
+            )
+            if copy_created is False:
+                return False
+
+            if copy_created:
+                update_stats(os.path.basename(filepath), len(text))
+                log(u"Copia externa actualizada (el original no se modificó): {}".format(filepath))
             
         else:
-            # ═══ NEW FILE: Save to NPP folder using line 1 as name ═══
-            name = get_document_name(text, index)
+            # ═══ NEW FILE: Save using its first-copy timestamp ═══
+            copy_name = get_untitled_copy_name(buffer_id, text, index)
+            copy_created = save_external_copy(
+                BACKUP_DIR, copy_name, text, force=force,
+                source_name=get_document_name(text, index),
+                source_type="untitled_buffer", buffer_id=buffer_id
+            )
+            if copy_created is False:
+                return False
             
-            # Save main file
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            filename = u"{}_{}.txt".format(name, date_str)
-            save_path = os.path.join(BASE_DIR, filename)
-            
-            with io.open(save_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            
-            # Create backup
-            create_backup(name, text)
-            
-            # Mark as saved in editor
-            editor.setSavePoint()
-            
-            update_stats(filename, len(text))
-            log(u"Saved (new): {}".format(filename))
+            filename = copy_name + u".txt"
+            if copy_created:
+                update_stats(filename, len(text))
+                log(u"Copia externa actualizada (el búfer sigue modificado): {}".format(filename))
         
         return True
         
     except Exception as e:
-        log(u"Error saving buffer {}: {}".format(index, e), "ERROR")
+        log(u"Error al copiar el búfer {}: {}".format(index, e), "ERROR")
         return False
         
     finally:
@@ -989,10 +1309,11 @@ def save_buffer(buffer_id, index):
 
 def save_current_buffer():
     """Save current/active buffer only."""
-    global last_save_time
+    global last_save_time, last_save_result
     
     try:
         if not editor.getModify():
+            last_save_result = "unchanged"
             return False
         
         # Get current file path
@@ -1009,24 +1330,34 @@ def save_current_buffer():
         # An empty buffer is only skippable when it is a NEW (untitled) file.
         # Emptying an existing file is a valid edit that must be saved.
         if not text and not saved:
+            last_save_result = "empty"
             return False
         
         if saved:
-            # ═══ ALREADY SAVED FILE: Save to original location ═══
-            notepad.save()
-            
-            # Create backup
-            name = os.path.splitext(os.path.basename(filepath))[0]
-            create_backup(name, text)
-            
-            update_stats(os.path.basename(filepath), len(text))
+            # Existing files are backup-only: never modify the original.
+            filename = os.path.basename(filepath)
+            name, extension = os.path.splitext(filename)
+            backup_name = get_backup_name(filepath, name)
+            copy_created = save_external_copy(
+                BACKUP_DIR, backup_name, text, extension or u".txt",
+                source_path=filepath, source_name=filename,
+                source_type="file",
+                buffer_id=notepad.getCurrentBufferID()
+            )
+            if copy_created is False:
+                last_save_result = "write_error"
+                return False
+
+            if copy_created:
+                update_stats(os.path.basename(filepath), len(text))
             
             last_save_time = datetime.now()
-            update_statusbar(u"✓ Sparad {}".format(last_save_time.strftime("%H:%M:%S")))
-            log(u"Saved (original): {}".format(filepath))
+            update_statusbar(u"✓ Copia {}".format(last_save_time.strftime("%H:%M:%S")))
+            if copy_created:
+                log(u"Copia externa actualizada (el original no se modificó): {}".format(filepath))
             
         else:
-            # ═══ NEW FILE: Save to NPP folder using line 1 as name ═══
+            # ═══ NEW FILE: Save using its first-copy timestamp ═══
             buffer_id = notepad.getCurrentBufferID()
             files = notepad.getFiles()
             index = 0
@@ -1035,37 +1366,36 @@ def save_current_buffer():
                     index = i
                     break
             
-            name = get_document_name(text, index)
+            copy_name = get_untitled_copy_name(buffer_id, text, index)
+            copy_created = save_external_copy(
+                BACKUP_DIR, copy_name, text,
+                source_name=get_document_name(text, index),
+                source_type="untitled_buffer", buffer_id=buffer_id
+            )
+            if copy_created is False:
+                last_save_result = "write_error"
+                return False
             
-            # Save main file
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            filename = u"{}_{}.txt".format(name, date_str)
-            save_path = os.path.join(BASE_DIR, filename)
-            
-            with io.open(save_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            
-            # Create backup
-            create_backup(name, text)
-            
-            # Mark as saved in editor
-            editor.setSavePoint()
-            
-            update_stats(filename, len(text))
+            filename = copy_name + u".txt"
+            if copy_created:
+                update_stats(filename, len(text))
             
             last_save_time = datetime.now()
-            update_statusbar(u"✓ Sparad {}".format(last_save_time.strftime("%H:%M:%S")))
-            log(u"Saved (new): {}".format(filename))
+            update_statusbar(u"✓ Copia {}".format(last_save_time.strftime("%H:%M:%S")))
+            if copy_created:
+                log(u"Copia externa actualizada (el búfer sigue modificado): {}".format(filename))
         
+        last_save_result = "updated" if copy_created else "same"
         return True
         
     except Exception as e:
-        log(u"Error saving: {}".format(e), "ERROR")
-        update_statusbar(u"✗ Fel vid sparning")
+        last_save_result = "write_error"
+        log(u"Error al copiar: {}".format(e), "ERROR")
+        update_statusbar(u"✗ Error al copiar")
         return False
 
 
-def save_all_buffers():
+def save_all_buffers(force=False):
     """Save ALL open buffers."""
     global last_save_time
     
@@ -1079,19 +1409,19 @@ def save_all_buffers():
         for index, file_info in enumerate(files):
             if len(file_info) >= 2:
                 buffer_id = file_info[1]
-                if save_buffer(buffer_id, index):
+                if save_buffer(buffer_id, index, force=force):
                     saved_count += 1
         
         if saved_count > 0:
             last_save_time = datetime.now()
-            update_statusbar(u"✓ Sparade {} flikar {}".format(saved_count, last_save_time.strftime("%H:%M:%S")))
-            log(u"Interval save: {} tabs".format(saved_count))
+            update_statusbar(u"✓ Se procesaron {} pestañas {}".format(saved_count, last_save_time.strftime("%H:%M:%S")))
+            log(u"Copia periódica: {} pestañas procesadas".format(saved_count))
             generate_index()
         
         return saved_count
         
     except Exception as e:
-        log(u"Error saving all buffers: {}".format(e), "ERROR")
+        log(u"Error al copiar todas las pestañas: {}".format(e), "ERROR")
         return 0
 
 
@@ -1102,18 +1432,159 @@ def manual_save():
     """Manual save command - saves current tab."""
     if save_current_buffer():
         generate_index()
-        notepad.messageBox(u"✓ Fil sparad!", u"NPP Autosave", 0)
+        if last_save_result == "same":
+            message = u"La copia ya está actualizada. No hay cambios nuevos."
+        else:
+            message = u"✓ La copia externa se ha actualizado."
+        log(message)
     else:
-        notepad.messageBox(u"Inget att spara", u"NPP Autosave", 0)
+        if last_save_result == "unchanged":
+            message = u"La pestaña no tiene cambios pendientes. Modifícala antes de crear la copia."
+        elif last_save_result == "empty":
+            message = u"La pestaña nueva está vacía. Escribe contenido antes de crear la copia."
+        else:
+            message = u"No se pudo crear la copia externa. Revisa autosave.log para ver el error."
+        log(message, "ERROR" if last_save_result == "write_error" else "INFO")
 
 
 def manual_save_all():
     """Manual save all command - saves all tabs."""
     count = save_all_buffers()
     if count > 0:
-        notepad.messageBox(u"✓ {} flikar sparade!".format(count), u"NPP Autosave", 0)
+        log(u"✓ {} copias de seguridad procesadas.".format(count))
     else:
-        notepad.messageBox(u"Inget att spara", u"NPP Autosave", 0)
+        log(u"No hay pestañas modificadas para copiar. Si esperabas una copia, revisa autosave.log.")
+
+
+def manual_force_save_all():
+    """Force an external copy of every open tab."""
+    count = save_all_buffers(force=True)
+    if count > 0:
+        log(u"✓ Se forzó la copia de {} pestañas abiertas.".format(count))
+    else:
+        log(u"No se pudo copiar ninguna pestaña. Revisa autosave.log.", "ERROR")
+
+
+def replace_repair_file(source, destination):
+    """Replace a repaired file atomically on PythonScript's Python 2 and 3."""
+    if os.name == "nt":
+        move_file = ctypes.windll.kernel32.MoveFileExW
+        move_file.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        move_file.restype = ctypes.c_int
+        if not move_file(filesystem_text(source), filesystem_text(destination), 0x9):  # REPLACE_EXISTING | WRITE_THROUGH
+            raise ctypes.WinError()
+    else:
+        os.rename(source, destination)
+
+
+def repair_copy_newlines(aggressive=False):
+    """Repair verified bytes, or explicitly collapse runs of 3+ line breaks."""
+    def collapse_run(match):
+        run = match.group(0)
+        if len(run.replace(b"\r\n", b"\n")) < 3:
+            return run
+        return b"\r\n" if run.startswith(b"\r\n") else run[:1]
+
+    if aggressive:
+        log(u"Reparación agresiva: se reducirán 3 o más saltos de línea a uno, sin verificar el SHA-256 previo.", "WARNING")
+    repaired = 0
+    for directory in (BACKUP_DIR, OLD_DIR):
+        directory = filesystem_text(directory)
+        try:
+            filenames = os.listdir(directory)
+        except OSError as e:
+            log(u"No se pudieron examinar las copias de {}: {}".format(directory, e), "ERROR")
+            continue
+        for filename in filenames:
+            copy_path = os.path.join(directory, filename)
+            if filename.endswith(".meta.json") or not os.path.isfile(copy_path):
+                continue
+            temporary = None
+            metadata_temporary = None
+            try:
+                if os.path.islink(copy_path):
+                    raise ValueError(u"No se reparan enlaces simbólicos")
+                metadata = load_copy_metadata(copy_path)
+                expected_hash = metadata.get("sha256") if isinstance(metadata, dict) else None
+                if not aggressive and not expected_hash:
+                    log(u"Sin SHA-256 verificable; copia intacta: {}".format(copy_path), "WARNING")
+                    continue
+                original_stat = os.stat(copy_path)
+                with io.open(copy_path, "rb") as source:
+                    damaged = source.read()
+                updated_metadata = None
+                if aggressive:
+                    restored = re.sub(b"(?:\r\n|[\r\n])+", collapse_run, damaged)
+                    if restored == damaged:
+                        continue
+                    restored_text = restored.decode("utf-8")
+                    updated_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+                    updated_metadata.update({
+                        "sha256": hashlib.sha256(restored).hexdigest(),
+                        "size_bytes": len(restored),
+                        "character_count": len(restored_text),
+                        "line_count": len(restored_text.splitlines()),
+                        "encoding": "utf-8",
+                        "newline_repaired_at": datetime.now().isoformat(),
+                    })
+                else:
+                    if hashlib.sha256(damaged).hexdigest() == expected_hash:
+                        continue
+                    restored = damaged.replace(b"\r\n", b"\n")
+                    if hashlib.sha256(restored).hexdigest() != expected_hash:
+                        log(u"No se pudo verificar la reparación; copia intacta: {}".format(copy_path), "WARNING")
+                        continue
+
+                backup_root = os.path.join(META_DIR, "newline_repairs")
+                if not os.path.isdir(backup_root):
+                    os.makedirs(backup_root)
+                backup_dir = tempfile.mkdtemp(prefix="copy-", dir=backup_root)
+                shutil.copy2(copy_path, os.path.join(backup_dir, filename))
+                metadata_path = copy_path + ".meta.json"
+                if os.path.isfile(metadata_path):
+                    shutil.copy2(metadata_path, os.path.join(backup_dir, filename + ".meta.json"))
+
+                fd, temporary = tempfile.mkstemp(prefix=".newline-repair-", dir=directory)
+                with os.fdopen(fd, "wb") as target:
+                    target.write(restored)
+                    target.flush()
+                    os.fsync(target.fileno())
+                os.utime(temporary, (original_stat.st_atime, original_stat.st_mtime))
+                if updated_metadata is not None:
+                    fd, metadata_temporary = tempfile.mkstemp(prefix=".newline-repair-", dir=META_DIR)
+                    with os.fdopen(fd, "wb") as target:
+                        target.write(json.dumps(updated_metadata, ensure_ascii=False, indent=2).encode("utf-8"))
+                        target.flush()
+                        os.fsync(target.fileno())
+                with io.open(copy_path, "rb") as source:
+                    if source.read() != damaged:
+                        raise RuntimeError(u"La copia cambió durante la reparación; no se sustituye")
+                if load_copy_metadata(copy_path) != metadata:
+                    raise RuntimeError(u"Los metadatos cambiaron durante la reparación; no se sustituye")
+                replace_repair_file(temporary, copy_path)
+                temporary = None
+                _copy_state.pop(copy_path, None)
+                repaired += 1
+                if metadata_temporary is not None:
+                    try:
+                        replace_repair_file(metadata_temporary, metadata_path)
+                        metadata_temporary = None
+                    except Exception as e:
+                        log(u"Contenido reparado, pero no se pudieron actualizar los metadatos de {}: {}".format(copy_path, e), "ERROR")
+                log(u"Copia reparada: {} | Respaldo previo: {}".format(copy_path, backup_dir))
+            except Exception as e:
+                log(u"No se pudo reparar {}: {}".format(copy_path, e), "ERROR")
+            finally:
+                for pending in (temporary, metadata_temporary):
+                    if pending is not None:
+                        try:
+                            os.remove(pending)
+                        except OSError as e:
+                            log(u"No se pudo eliminar el temporal {}: {}".format(pending, e), "ERROR")
+    if repaired:
+        generate_index()
+    log(u"Reparación de finales de línea: {} copias reparadas. Revisa autosave.log para ver los detalles.".format(repaired))
+    return repaired
 
 
 def open_index():
@@ -1123,7 +1594,7 @@ def open_index():
         generate_index()
         subprocess.Popen(['start', '', INDEX_FILE], shell=True)
     except Exception as e:
-        log(u"Could not open index: {}".format(e), "ERROR")
+        log(u"No se pudo abrir el índice: {}".format(e), "ERROR")
 
 
 def open_config():
@@ -1139,7 +1610,7 @@ def open_folder():
     try:
         subprocess.Popen(['explorer', BASE_DIR])
     except Exception as e:
-        log(u"Could not open folder: {}".format(e), "ERROR")
+        log(u"No se pudo abrir la carpeta: {}".format(e), "ERROR")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1168,7 +1639,6 @@ class AutoSaver:
         self.target_buffer = None     # buffer that was being edited
         self.pending_idle_save = False
         self.last_interval = 0.0
-        self.maintenance_count = 0
 
     def on_text_changed(self, args):
         """Called on the UI thread on every text change - schedules idle save."""
@@ -1185,7 +1655,7 @@ class AutoSaver:
         except Exception:
             self.target_buffer = None
 
-        update_statusbar(u"⏳ Sparas om {}s...".format(get_idle_time()))
+        update_statusbar(u"⏳ Copia en {} s...".format(get_idle_time()))
     
     def _buffer_index(self, buffer_id):
         """Find the tab index of a buffer (used for new-file naming)."""
@@ -1215,7 +1685,7 @@ class AutoSaver:
         ok = save_buffer(target, self._buffer_index(target))
         if ok:
             last_save_time = datetime.now()
-            update_statusbar(u"✓ Sparad {}".format(last_save_time.strftime("%H:%M:%S")))
+            update_statusbar(u"✓ Copia {}".format(last_save_time.strftime("%H:%M:%S")))
         return ok
 
     def tick(self, hwnd, msg, timer_id, ticks):
@@ -1233,23 +1703,18 @@ class AutoSaver:
                     if self._do_idle_save():
                         generate_index()
                 except Exception as e:
-                    log(u"Idle save error: {}".format(e), "ERROR")
+                    log(u"Error en la copia por inactividad: {}".format(e), "ERROR")
 
             # ── Interval save: ALL tabs ──
             if (now - self.last_interval) >= get_interval_time():
                 self.last_interval = now
                 try:
                     save_all_buffers()
-
-                    self.maintenance_count += 1
-                    if self.maintenance_count >= 10:
-                        self.maintenance_count = 0
-                        move_old_backups()
                 except Exception as e:
-                    log(u"Interval save error: {}".format(e), "ERROR")
+                    log(u"Error en la copia periódica: {}".format(e), "ERROR")
 
         except Exception as e:
-            log(u"AutoSaver tick error: {}".format(e), "ERROR")
+            log(u"Error en el temporizador de Autosave: {}".format(e), "ERROR")
     
     def start(self):
         """Start both idle and interval monitoring."""
@@ -1259,9 +1724,13 @@ class AutoSaver:
         self.running = True
         
         try:
-            editor.callback(self.on_text_changed, [NOTIFICATION.MODIFIED])
+            if MODIFIED_NOTIFICATION is None:
+                raise AttributeError(
+                    "PythonScript no expone la notificación MODIFIED de Scintilla"
+                )
+            editor.callback(self.on_text_changed, [MODIFIED_NOTIFICATION])
         except Exception as e:
-            log(u"Error registering callback: {}".format(e), "ERROR")
+            log(u"Error al registrar la devolución de llamada: {}".format(e), "ERROR")
 
         # Win32 timer with NULL hwnd is associated with the calling thread
         # (the script runs on Notepad++'s main thread), so the callback is
@@ -1275,10 +1744,10 @@ class AutoSaver:
             user32.SetTimer.restype = ctypes.c_size_t
             self.timer_id = user32.SetTimer(None, 0, self.TICK_MS, self._timer_proc)
             if not self.timer_id:
-                raise RuntimeError("SetTimer returned 0")
+                raise RuntimeError("SetTimer devolvió 0")
         except Exception as e:
             self.timer_id = None
-            log(u"Error creating timer: {}".format(e), "ERROR")
+            log(u"Error al crear el temporizador: {}".format(e), "ERROR")
 
         try:
             self.last_interval = time.time()
@@ -1286,14 +1755,14 @@ class AutoSaver:
             idle = get_idle_time()
             interval = get_interval_time()
 
-            log(u"AutoSaver started")
-            log(u"  - Active tab: {}s after idle".format(idle))
-            log(u"  - All tabs: every {}s ({}min)".format(interval, interval // 60))
+            log(u"Autosave iniciado")
+            log(u"  - Pestaña activa: tras {} s sin actividad".format(idle))
+            log(u"  - Todas las pestañas: cada {} s ({} min)".format(interval, interval // 60))
 
-            update_statusbar(u"✓ Autosave aktiv")
+            update_statusbar(u"✓ Autosave activo")
 
         except Exception as e:
-            log(u"Error starting AutoSaver: {}".format(e), "ERROR")
+            log(u"Error al iniciar Autosave: {}".format(e), "ERROR")
 
     def stop(self):
         """Stop all monitoring."""
@@ -1305,11 +1774,12 @@ class AutoSaver:
                 self.timer_id = None
             self._timer_proc = None
 
-            editor.clearCallbacks([NOTIFICATION.MODIFIED])
-            log(u"AutoSaver stopped")
+            if MODIFIED_NOTIFICATION is not None:
+                editor.clearCallbacks([MODIFIED_NOTIFICATION])
+            log(u"Autosave detenido")
             
         except Exception as e:
-            log(u"Error stopping AutoSaver: {}".format(e), "ERROR")
+            log(u"Error al detener Autosave: {}".format(e), "ERROR")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1322,21 +1792,34 @@ except NameError:
 except Exception:
     pass
 
+migrate_untitled_copies(BACKUP_DIR)
+migrate_untitled_copies(OLD_DIR)
+
 _autosaver = AutoSaver()
 _autosaver.start()
 
 generate_index()
 
 log(u"═" * 60)
-log(u"NPP Autosave v{} loaded".format(__version__))
+log(u"NPP Autosave v{} cargado".format(__version__))
 log(u"© {} {}".format(datetime.now().year, __author__))
 log(u"═" * 60)
-log(u"Folder:       {}".format(BASE_DIR))
-log(u"Idle time:    {}s (active tab)".format(get_idle_time()))
-log(u"Interval:     {}s / {}min (all tabs)".format(get_interval_time(), get_interval_time() // 60))
+log(u"Directorio:    {}".format(BASE_DIR))
+log(u"Configuración: {}".format(CONFIG_FILE))
+log(u"Inactividad:  {} s (pestaña activa)".format(get_idle_time()))
+log(u"Intervalo:     {} s / {} min (todas las pestañas)".format(get_interval_time(), get_interval_time() // 60))
 log(u"═" * 60)
-log(u"Saved files   → Original location")
-log(u"New files     → NPP folder (line 1 = filename)")
+log(u"Archivos originales → Solo se copian al directorio de respaldo")
+log(u"Todas las copias     → Subdirectorio _backup del directorio base")
 log(u"═" * 60)
-log(u"Commands: manual_save(), manual_save_all(), open_index()")
+log(u"Comandos de copia:")
+log(u"  manual_save()            Copiar pestaña activa modificada")
+log(u"  manual_save_all()        Copiar todas las pestañas modificadas")
+log(u"  manual_force_save_all()  Forzar copia de todas las pestañas")
+log(u"  repair_copy_newlines()   Reparar copias verificadas con SHA-256")
+log(u"  repair_copy_newlines(aggressive=True)  Reducir 3+ saltos de línea a uno")
+log(u"Comandos de apertura:")
+log(u"  open_index()             Abrir índice HTML")
+log(u"  open_config()            Abrir config.txt")
+log(u"  open_folder()            Abrir directorio de copias")
 log(u"═" * 60)

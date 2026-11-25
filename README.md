@@ -7,12 +7,12 @@ Python
 
 ✨ Features
 Feature	Description
-💾 Smart Saving	Saves active tab 10 seconds after you stop typing
-🔄 Interval Backup	Saves ALL tabs every 5 minutes
-📁 Dual Save Mode	Existing files → original location, New files → NPP folder
+💾 Smart Saving	Copies active tab 10 seconds after you stop typing
+🔄 Interval Backup	Copies ALL modified tabs every 5 minutes
+📁 Backup Mode	Existing files → backup folder only, New files → NPP folder
 📊 Statistics	Tracks saves, file sizes, and daily activity
 🔍 HTML Index	Searchable file browser with dark/light theme
-📦 Backup Rotation	Auto-archive old backups after 30 days
+📦 Single Current Copy	One external file per open document; updates overwrite it
 ⚙️ Configurable	Simple config.txt for all settings
 📥 Installation
 Step 1: Install PythonScript Plugin
@@ -58,23 +58,23 @@ text
 │            FILE SAVE DECISION                   │
 ├─────────────────────────────────────────────────┤
 │                                                 │
-│   Is file already saved to disk?                │
+│   Does the file already have a path?            │
 │                                                 │
 │        YES                      NO              │
 │         │                        │              │
 │         ▼                        ▼              │
 │   ┌───────────┐          ┌─────────────┐       │
-│   │ Save to   │          │ Save to     │       │
-│   │ ORIGINAL  │          │ NPP folder  │       │
-│   │ location  │          │ Line 1 =    │       │
-│   │           │          │ filename    │       │
+│   │ Create    │          │ Save to     │       │
+│   │ one copy  │          │ one copy in │       │
+│   │ in backup │          │ backup      │       │
+│   │           │          │ with date   │       │
 │   └───────────┘          └─────────────┘       │
 │         │                        │              │
 │         └──────────┬─────────────┘              │
 │                    ▼                            │
 │            ┌─────────────┐                      │
-│            │ Create      │                      │
-│            │ backup copy │                      │
+│            │ Keep editor │                      │
+│            │ modified    │                      │
 │            └─────────────┘                      │
 │                                                 │
 └─────────────────────────────────────────────────┘
@@ -88,53 +88,95 @@ Open new tab (Ctrl+N)
 Type on line 1: My Notes
 Type content below
 Stop typing, wait 10 seconds
-✅ File saved as: My Notes_2026-03-05.txt
+✅ Copy saved as: 2026-03-05_10-30-00_a1b2c3d4.txt
 Example 2: Existing File
 Open C:\Projects\readme.txt
 Make changes
 Stop typing, wait 10 seconds
-✅ File saved to C:\Projects\readme.txt (same location)
-✅ Backup created in ~/Documents/NPP/_backup/
+✅ Original C:\Projects\readme.txt remains unchanged
+✅ Current copy updated in ~/Documents/NPP/_backup/
+
+The document stays marked as modified. Save manually in Notepad++ when you
+want to update the original file.
+Copies are UTF-8 and preserve the editor's exact line endings (CRLF, LF, CR,
+or mixed) and intentional blank lines, without Windows newline translation.
+Updating the script prevents new corruption; it does not automatically repair
+line endings in existing copies.
+
+To repair affected copies, reload the updated script and run
+`repair_copy_newlines()` in the PythonScript console. It checks `_backup` and
+`_old`, reverses one Windows newline translation, and restores a copy only if
+the recovered bytes match its recorded SHA-256 exactly. Already matching copies
+are unchanged. Copies with missing or nonmatching hashes are left untouched,
+with warnings in `autosave.log`; intentional blank lines are never guessed away.
+This restores the content recorded before the last copy write, not damage
+already present in that editor buffer.
+
+For a more aggressive cleanup, run `repair_copy_newlines(aggressive=True)`.
+This does not require a matching or existing SHA-256: it reduces each run of
+**three or more consecutive line breaks to one**, counting CRLF as a single
+break and also supporting LF, CR, and mixed endings. Single and double breaks
+remain unchanged; the retained break uses the first break's format. This can
+remove intentional blank lines, so it only runs when explicitly requested.
+The metadata hash and content counts are updated to match the repaired UTF-8
+file, without incrementing its copy count.
+
+Before each repair, the damaged file and any existing metadata are preserved
+in a unique `_meta/newline_repairs/copy-*` directory. File replacement is atomic;
+the original modification time is retained. The HTML index is refreshed after
+repairs. If a repaired copy is open in Notepad++, reload it from disk when
+prompted instead of saving the old tab contents over it.
 📂 Folder Structure
 text
 
 C:\Users\YourName\Documents\NPP\
 │
 ├── index.html                    ← Open in browser to view files
-├── config.txt                    ← Settings
 ├── autosave.log                  ← Activity log
 │
-├── My Notes_2026-03-05.txt       ← Saved documents
-├── Todo List_2026-03-05.txt
+├── _backup/                      ← One current copy per open document
+│   ├── 2026-03-05_10-30-00_a1b2c3d4.txt
+│   ├── 2026-03-05_10-30-00_a1b2c3d4.txt.meta.json
+│   ├── 2026-03-05_10-31-00_b2c3d4e5.txt
+│   └── readme_e5f6a7b8.txt
 │
-├── _backup/                      ← Recent backups (0-30 days)
-│   ├── My Notes_2026-03-05_143022.txt
-│   └── My Notes_2026-03-05_150133.txt
+│   Each copy has a .meta.json sidecar with source path/name, first-copy and
+│   last-update timestamps, original modification time, copy count, byte/line
+│   counts, extension, source type, and SHA-256.
 │
-├── _old/                         ← Archived backups (30+ days)
-│   └── My Notes_2026-02-01_120000.txt
+├── _old/                         ← Legacy files from earlier versions
 │
 └── _meta/
     └── stats.json                ← Statistics data
+
+Untitled copies use the date and time of their first copy and a collision
+suffix; their name remains stable while the buffer is open. Copies of saved
+files keep their original name and identity suffix. On startup, existing
+untitled copies with metadata are renamed in `_backup` and `_old` using their
+recorded first-copy time. Copies without usable metadata are left unchanged;
+migration errors are reported in `autosave.log`.
 ⚙️ Configuration
-Edit config.txt in your NPP folder:
+Edit the bootstrap configuration at:
+
+```text
+C:\Users\YourName\Documents\NPP\config.txt
+```
+
+`config.txt` remains at that fixed location so the script can find it before
+knowing which data directory to use. All other files go to `base_dir`.
 
 ini
+
+# Base directory for external copies, log, index, and statistics
+# Accepts absolute paths, ~, environment variables, or a path relative to
+# the directory containing config.txt.
+base_dir = D:\NPP-Autosave
 
 # Seconds after typing stops to save active tab
 idle_time = 10
 
 # Seconds between saving ALL tabs (300 = 5 minutes)
 interval_time = 300
-
-# Move backups older than X days to _old folder
-max_backup_age_days = 30
-
-# Max backups per file in _backup folder
-max_backups_per_file = 50
-
-# Show popup when saving (true/false)
-show_notifications = false
 
 # Show status in statusbar (true/false)
 show_statusbar = true
@@ -145,8 +187,11 @@ theme = dark
 Open console: Plugins → PythonScript → Show Console
 
 Command	Description
-manual_save()	Save active tab now
-manual_save_all()	Save all tabs now
+manual_save()	Create an external copy of the active tab
+manual_save_all()	Create external copies of all modified tabs
+manual_force_save_all()	Force an external copy of every open tab
+repair_copy_newlines()	Repair newline translation only when SHA-256 verifies the result
+repair_copy_newlines(aggressive=True)	Reduce runs of 3+ line breaks to one, with backups
 open_index()	Open index in browser
 open_config()	Open config file
 open_folder()	Open NPP folder in Explorer
@@ -155,11 +200,71 @@ _autosaver.start()	Restart autosave
 📊 HTML Index
 Open index.html in your browser to access:
 
-🔍 Search - Find files instantly
+🔍 Full-text search across file names, original paths, and copy contents
+🔎 Search operators:
+  - `contenido:factura`
+  - `ruta:"D:\Proyectos Cliente"`
+  - `nombre:informe`
+  - `ext:.py`
+  - `desde:2026-11-01`
+  - `hasta:2026-11-25`
+  - Combine filters, for example:
+    `contenido:error ruta:"C:\Proyecto" ext:.log desde:2026-11-01`
 🌓 Theme Toggle - Dark/Light mode
 🔗 Quick Links - Click to open any file
 📈 Statistics - View save activity
 📁 Sections - Documents / Backups / Archive
+
+Search previews show the matching content and highlight the first match. Up to
+500,000 characters per file are embedded in the HTML index to keep it
+manageable.
+
+### Search in the browser, open copies in Notepad++
+
+Preview HTML is no longer needed. Update [Autosave.py](./Autosave.py), then
+place [OpenAutosaveIndex.py](./OpenAutosaveIndex.py) and
+[OpenAutosaveFile.ps1](./OpenAutosaveFile.ps1) together in your PythonScript
+scripts directory.
+
+1. Restart Notepad++ (or reload Autosave) to regenerate the index with
+   `npp-autosave:` links.
+2. Run **Plugins > PythonScript > Scripts > OpenAutosaveIndex**.
+3. Search in the default browser and click a filename. Allow the browser to
+   open the external application when prompted.
+
+The opener reads the same `config.txt` / `base_dir`. It installs a small
+PowerShell handler and its settings in `~/Documents/NPP/_protocol` and registers
+`HKEY_CURRENT_USER\Software\Classes\npp-autosave`. No administrator rights,
+Preview HTML, external Python installation, or running server are required.
+PythonScript's Python 2 and Python 3 editions are supported.
+
+Each result opens the **backup copy**, not the original. Notepad++ handles
+already-open files normally and is launched if it is closed. The handler uses
+the executable of the Notepad++ installation that ran the opener. It accepts
+only encoded filenames directly inside the configured `_backup` or `_old`
+folder; path traversal, metadata sidecars, and symbolic links are rejected.
+Windows cloud placeholders (including OneDrive) are allowed: their
+`ReparsePoint` attribute is not, on its own, evidence of a symbolic link. The
+handler checks the Windows reparse tag, allowing cloud placeholders while
+rejecting symbolic links, junctions, and unrecognized reparse types.
+Filenames are passed as a quoted argument, never as a shell command.
+
+The opener registers the protocol before opening the existing index; it does
+not restart Autosave or regenerate the HTML. Rerun it after changing `base_dir`
+or moving Notepad++, and after updating `OpenAutosaveFile.ps1` so its installed
+copy is refreshed. The `open_index()` console command still opens the browser
+but does not perform protocol registration.
+
+The handler uses Windows PowerShell with a process-local `RemoteSigned` policy;
+it does not change the stored execution policy. If organizational policies
+block PowerShell or custom protocols, ask your administrator rather than
+disabling those policies. A console window may briefly appear when opening a
+copy. Handler errors are shown in a dialog.
+
+To uninstall the protocol, delete only
+`HKEY_CURRENT_USER\Software\Classes\npp-autosave` in Registry Editor. The
+`~/Documents/NPP/_protocol` folder can then be removed without deleting backups.
+
 🐛 Troubleshooting
 Script not loading
 Check: Plugins → PythonScript → Configuration
@@ -178,7 +283,14 @@ Run in console:
 Python
 
 open_folder()
+
+Changing `base_dir` takes effect after restarting Notepad++ or reloading the
+script. Existing files are not moved automatically.
 📜 Changelog
+Unreleased
+✅ Existing files are copied to the backup folder without changing originals
+✅ Backup names include a stable source identifier and preserve the extension
+✅ Editor buffers remain marked as modified after backup
 v1.2.0
 ✅ Dual save mode (original location vs NPP folder)
 ✅ Interval save for all tabs every 5 minutes
@@ -189,7 +301,7 @@ v1.1.0
 ✅ HTML index with search
 ✅ Statistics tracking
 ✅ Dark/Light theme
-✅ Backup rotation
+✅ One current external copy per document
 v1.0.0
 ✅ Initial release
 📄 License
