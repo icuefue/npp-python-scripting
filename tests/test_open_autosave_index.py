@@ -8,7 +8,6 @@ import types
 import unittest
 from unittest import mock
 from urllib.parse import unquote
-import AutosaveStorage
 
 
 class OpenAutosaveIndexTests(unittest.TestCase):
@@ -21,11 +20,6 @@ class OpenAutosaveIndexTests(unittest.TestCase):
         self.addCleanup(home.stop)
         self.config_dir = self.home / "Documents" / "NPP"
         self.config_dir.mkdir(parents=True)
-        locator = mock.patch.object(
-            AutosaveStorage, "LOCATOR_FILE", str(self.home / "locator")
-        )
-        locator.start()
-        self.addCleanup(locator.stop)
         self.notepad = mock.Mock()
         spec = importlib.util.spec_from_file_location(
             "open_index_test", Path(__file__).resolve().parents[1] / "OpenAutosaveIndex.py"
@@ -34,17 +28,15 @@ class OpenAutosaveIndexTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"Npp": types.SimpleNamespace(notepad=self.notepad)}):
             spec.loader.exec_module(self.script)
 
-    def test_resolves_active_directory_not_pending_configuration(self):
+    def test_resolves_default_relative_and_expanded_base_directory(self):
         self.assertEqual(self.script.get_index_path(), str(self.config_dir / "index.html"))
         config = self.config_dir / "config.txt"
         config.write_text('# comment\nbase_dir = "copias"\n', encoding="utf-8")
-        AutosaveStorage.write_locator(str(self.config_dir))
-        self.assertEqual(self.script.get_index_path(), str(self.config_dir / "index.html"))
-        active = self.home / "copias"
-        active.mkdir()
-        (active / "config.txt").write_text("base_dir = {}\n".format(active), encoding="utf-8")
-        AutosaveStorage.write_locator(str(active))
-        self.assertEqual(self.script.get_index_path(), str(active / "index.html"))
+        self.assertEqual(
+            self.script.get_index_path(), str(self.config_dir / "copias" / "index.html")
+        )
+        config.write_text("base_dir = ~/copias\n", encoding="utf-8")
+        self.assertEqual(self.script.get_index_path(), str(self.home / "copias" / "index.html"))
 
     def test_registers_before_opening_browser_and_reports_missing_index(self):
         with mock.patch.object(self.script, "register_protocol") as register, \
@@ -90,7 +82,7 @@ class OpenAutosaveIndexTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SystemRoot": str(system_root)}), \
                 mock.patch.dict(sys.modules, {"winreg": registry}):
             self.script.register_protocol(str(base_dir))
-        install_dir = base_dir / "_protocol"
+        install_dir = self.config_dir / "_protocol"
         self.assertEqual(
             (install_dir / "OpenAutosaveFile.ps1").read_bytes(),
             (Path(self.script.__file__).parent / "OpenAutosaveFile.ps1").read_bytes(),

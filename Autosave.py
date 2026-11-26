@@ -40,11 +40,6 @@ import sys
 import time
 from datetime import datetime
 
-_scripts_dir = os.path.dirname(os.path.abspath(__file__))
-if _scripts_dir not in sys.path:
-    sys.path.insert(0, _scripts_dir)
-import AutosaveStorage
-
 text_type = type(u"")
 
 
@@ -125,22 +120,35 @@ def copy_url(path):
 # ══════════════════════════════════════════════════════════════════
 # SETTINGS
 # ══════════════════════════════════════════════════════════════════
-def register_migrated_protocol(base_dir):
-    from OpenAutosaveIndex import register_protocol
-    register_protocol(base_dir)
+CONFIG_DIR = os.path.expanduser("~/Documents/NPP")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.txt")
+DEFAULT_BASE_DIR = CONFIG_DIR
 
 
-DEFAULT_BASE_DIR = AutosaveStorage.default_base_dir()
-try:
-    BASE_DIR = AutosaveStorage.prepare_storage(register_migrated_protocol)
-except Exception as e:
-    message = u"No se pudo preparar el directorio de Autosave: {}".format(e)
-    if sys.version_info[0] == 2:
-        message = message.encode("utf-8")
-    notepad.messageBox(message, "NPP Autosave")
-    raise
-CONFIG_DIR = BASE_DIR
-CONFIG_FILE = os.path.join(BASE_DIR, "config.txt")
+def get_configured_base_dir():
+    """Read the base directory before the remaining settings are available."""
+    configured_path = DEFAULT_BASE_DIR
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with io.open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    if key.strip().lower() == "base_dir":
+                        configured_path = value.strip().strip(u"'\"")
+                        break
+    except Exception:
+        configured_path = DEFAULT_BASE_DIR
+
+    configured_path = os.path.expandvars(os.path.expanduser(configured_path))
+    if not os.path.isabs(configured_path):
+        configured_path = os.path.join(CONFIG_DIR, configured_path)
+    return os.path.normpath(configured_path)
+
+
+BASE_DIR = get_configured_base_dir()
 BACKUP_DIR = os.path.join(BASE_DIR, "_backup")
 OLD_DIR = os.path.join(BASE_DIR, "_old")
 META_DIR = os.path.join(BASE_DIR, "_meta")
@@ -258,14 +266,6 @@ def get_config_value(key, default=None):
     except Exception:
         pass
     return default
-
-
-if not os.path.isfile(CONFIG_FILE):
-    create_default_config()
-if not os.path.isfile(CONFIG_FILE):
-    raise IOError(u"No se pudo crear la configuración: {}".format(CONFIG_FILE))
-if not os.path.exists(AutosaveStorage.LOCATOR_FILE):
-    AutosaveStorage.write_locator(BASE_DIR)
 
 
 def get_idle_time():

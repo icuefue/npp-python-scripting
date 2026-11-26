@@ -13,7 +13,6 @@ de Notepad++ cuando quieras actualizar el original.
 | Archivo | Función |
 | --- | --- |
 | [Autosave.py](./Autosave.py) | Crea las copias, mantiene las estadísticas y genera el índice. |
-| [AutosaveStorage.py](./AutosaveStorage.py) | Localiza y migra el directorio de datos. |
 | [OpenAutosaveIndex.py](./OpenAutosaveIndex.py) | Registra el protocolo de apertura para el usuario actual y abre el índice en el navegador. |
 | [OpenAutosaveFile.ps1](./OpenAutosaveFile.ps1) | Recibe los enlaces del índice y abre las copias en Notepad++. |
 
@@ -28,15 +27,15 @@ de Notepad++ cuando quieras actualizar el original.
 
 1. En Notepad++, abre **Plugins > Plugins Admin**, instala **PythonScript** y
    reinicia Notepad++.
-2. Copia los cuatro archivos del repositorio a la carpeta de scripts del usuario
+2. Copia los tres archivos del repositorio a la carpeta de scripts del usuario
    de PythonScript. Una ubicación habitual es:
 
    ```text
    %APPDATA%\Notepad++\plugins\config\PythonScript\scripts\
    ```
 
-   La ruta puede variar según la instalación. Mantén los cuatro archivos en la
-   misma carpeta.
+   La ruta puede variar según la instalación. Mantén `OpenAutosaveIndex.py` y
+   `OpenAutosaveFile.ps1` en la misma carpeta.
 3. Ejecuta **Plugins > PythonScript > Scripts > Autosave**. El script inicia
    la supervisión y genera el índice. Abre **Plugins > PythonScript > Show
    Console** para comprobar los mensajes y consultar posibles errores.
@@ -92,9 +91,8 @@ archivos de metadatos como documentos.
 
 ## Archivos y directorios
 
-Por defecto, los datos se encuentran en `~/Documents/NPP`. Todos los archivos
-de datos, incluida la configuración y el protocolo, se guardan en el
-directorio base activo. Con la configuración predeterminada, la estructura es:
+Por defecto, los datos se encuentran en `~/Documents/NPP`. Con la
+configuración predeterminada, la estructura es:
 
 ```text
 ~/Documents/NPP/
@@ -110,18 +108,14 @@ directorio base activo. Con la configuración predeterminada, la estructura es:
     └── settings.json
 ```
 
-Junto a los scripts de PythonScript se crea `.autosave-base-dir`, un archivo
-que contiene únicamente la ruta del directorio activo para localizar la
-configuración al arrancar.
-
 `_old` se incluye en el índice para consultar archivos existentes, pero el
 script no archiva allí automáticamente las copias actuales.
 
 ## Configuración
 
-El archivo `config.txt` está en el directorio base activo. Se crea con los
-valores predeterminados cuando Autosave lo necesita. Puedes abrirlo con
-`open_config()` desde la consola.
+El archivo de configuración siempre está en `~/Documents/NPP/config.txt`.
+Se crea con los valores predeterminados cuando Autosave lo necesita. Puedes
+abrirlo con `open_config()` desde la consola.
 
 ```ini
 # Segundos sin actividad antes de copiar la pestaña editada
@@ -142,33 +136,14 @@ theme = dark
 
 `idle_time` tiene un mínimo de un segundo e `interval_time`, de 60 segundos.
 `base_dir` admite rutas absolutas, `~`, variables de entorno y rutas relativas
-al directorio que contiene `config.txt`. El botón del índice permite cambiar el
-tema en el navegador.
+al directorio que contiene `config.txt`. Las copias, el índice, el registro y
+las estadísticas se guardan en ese directorio; `config.txt` y `_protocol`
+permanecen en `~/Documents/NPP`.
 
-### Cambiar el directorio base
-
-1. Abre `config.txt` con `open_config()`, modifica `base_dir` y guarda el
-   archivo.
-2. Reinicia Notepad++ o vuelve a cargar Autosave. El cambio no se aplica hasta
-   ese momento.
-3. Autosave copia el contenido del directorio anterior al nuevo, incluidos
-   configuración, copias, estadísticas y protocolo. **Los archivos existentes
-   con el mismo nombre en el destino se sobrescriben.** El origen se conserva.
-4. Una vez copiados los archivos, se actualizan el protocolo instalado y el
-   localizador. La ruta de `base_dir` en la nueva configuración se guarda como
-   ruta absoluta.
-
-Si la migración falla, se muestra un error y el directorio anterior permanece
-activo. El destino puede contener archivos ya copiados o sobrescritos; corrige
-el error y vuelve a cargar Autosave para reintentar. El destino no puede ser un
-directorio que contenga al origen. Si está dentro del origen, se excluye el
-propio destino de la copia para evitar recursión. Los enlaces simbólicos no se
-migran.
-
-Al actualizar desde una versión anterior con un `base_dir` personalizado, los
-datos ya existentes permanecen en ese directorio; se trasladan allí la
-configuración y el protocolo que antes estaban en `~/Documents/NPP`. Ejecuta
-la versión actualizada una vez antes de modificar `base_dir`.
+Para cambiar `base_dir`, modifica `config.txt` y reinicia Notepad++ o vuelve a
+cargar Autosave. Los archivos existentes no se mueven automáticamente.
+Después, ejecuta de nuevo `OpenAutosaveIndex` para actualizar el registro del
+protocolo. El botón del índice también permite cambiar el tema en el navegador.
 
 ## Índice HTML y búsqueda
 
@@ -213,13 +188,11 @@ Se abre **la copia**, no el archivo original. El lanzador utiliza el
 abre el índice existente: no inicia Autosave ni regenera el índice. Si no
 existe, ejecuta primero `Autosave`.
 
-El lanzador copia el script PowerShell y su configuración a `_protocol` dentro
-del directorio base y
+El lanzador copia el script PowerShell y su configuración a `_protocol` y
 registra `npp-autosave:` en `HKEY_CURRENT_USER\Software\Classes`, sin
 necesidad de administrador ni cambios en las asociaciones de archivos. Vuelve
-a ejecutar `OpenAutosaveIndex` después de mover Notepad++ o actualizar
-`OpenAutosaveFile.ps1`. Al cambiar `base_dir`, Autosave actualiza el protocolo
-ya instalado durante la migración.
+a ejecutar `OpenAutosaveIndex` después de cambiar `base_dir`, mover Notepad++
+o actualizar `OpenAutosaveFile.ps1`.
 
 Por seguridad, el manejador solo admite nombres de archivos directamente en
 `_backup` o `_old`; rechaza rutas externas, metadatos, enlaces simbólicos,
@@ -230,7 +203,7 @@ política guardada del sistema. Los errores se muestran en un cuadro de diálogo
 
 Para eliminar el registro del protocolo, borra la clave
 `HKEY_CURRENT_USER\Software\Classes\npp-autosave` del registro de Windows.
-Después puedes eliminar `_protocol` del directorio base; esto no elimina las
+Después puedes eliminar `~/Documents/NPP/_protocol`; esto no elimina las
 copias.
 
 ## Comandos de consola
@@ -265,9 +238,9 @@ menú de scripts, utiliza los nombres mostrados en la tabla.
   comprueba que ambos scripts de apertura estén juntos y acepta la solicitud
   del navegador. Si una política de la organización bloquea PowerShell o los
   protocolos personalizados, consulta con el administrador.
-- **Ha fallado el cambio de `base_dir`:** revisa el mensaje de error y los
-  permisos de ambos directorios y de la carpeta de scripts. El directorio
-  anterior se conserva y el destino puede contener una copia parcial.
+- **Has cambiado `base_dir` y no ves los archivos antiguos:** las copias no se
+  trasladan automáticamente. Revisa el directorio anterior y actualiza el
+  registro del protocolo ejecutando `OpenAutosaveIndex` de nuevo.
 
 ## Licencia y atribución
 

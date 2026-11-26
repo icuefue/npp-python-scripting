@@ -211,9 +211,6 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
-# Local Autosave data directory
-.autosave-base-dir
-
 # PyPI configuration file
 .pypirc
 
