@@ -627,7 +627,7 @@ def format_time_ago(timestamp):
     elif diff < 86400:
         return "hace {} h".format(int(diff / 3600))
     elif diff < 604800:
-        return "hace {} días".format(int(diff / 86400))
+        return u"hace {} días".format(int(diff / 86400))
     else:
         return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
 
