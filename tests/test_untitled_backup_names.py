@@ -21,7 +21,8 @@ class UntitledBackupTests(unittest.TestCase):
         npp.notepad = mock.Mock()
         npp.editor = mock.Mock()
         npp.console = mock.Mock()
-        npp.NOTIFICATION = types.SimpleNamespace(MODIFIED=1)
+        npp.NOTIFICATION = types.SimpleNamespace(MODIFIED=1, BUFFERACTIVATED=4)
+        npp.SCINTILLANOTIFICATION = types.SimpleNamespace(MODIFIED=2, UPDATEUI=3)
         npp.STATUSBARSECTION = types.SimpleNamespace(DOCTYPE=1)
         self.npp = npp
         spec = importlib.util.spec_from_file_location(
@@ -61,6 +62,105 @@ class UntitledBackupTests(unittest.TestCase):
         self.assertIn("# © {} icuefue".format(year), config)
         self.assertIn("&copy; {} icuefue".format(year), html)
         self.assertIn("© {} icuefue".format(year), log)
+
+    def test_status_reports_when_autosave_is_stopped(self):
+        a = self.autosave
+        saver = a._autosaver
+        saver.running = False
+        saver.timer_id = None
+        messages = []
+
+        with mock.patch.object(a, "log", side_effect=messages.append):
+            self.assertEqual(
+                a.status(),
+                "Autosave detenido. No hay copias automáticas programadas.",
+            )
+        self.assertEqual(messages, [
+            "Autosave detenido. No hay copias automáticas programadas."
+        ])
+        a.notepad.messageBox.assert_not_called()
+
+    def test_status_reports_next_periodic_copy(self):
+        a = self.autosave
+        saver = a._autosaver
+        saver.running = True
+        saver.timer_id = 1
+        saver.last_tick = 199.9
+        saver.last_interval = 100.0
+        saver.pending_idle_save = False
+
+        with mock.patch.object(a, "get_interval_time", return_value=300):
+            self.assertEqual(
+                saver.get_status_message(now=200.1),
+                "Autosave activo. Próxima copia periódica en 3 min 20 s.",
+            )
+
+    def test_status_prefers_pending_idle_copy_when_it_is_sooner(self):
+        a = self.autosave
+        saver = a._autosaver
+        saver.running = True
+        saver.timer_id = 1
+        saver.last_interval = 100.0
+        saver.pending_idle_save = True
+        saver.last_change = 350.5
+        saver.last_tick = 350.0
+        messages = []
+
+        with mock.patch.object(a, "get_interval_time", return_value=300), \
+                mock.patch.object(a, "get_idle_time", return_value=10), \
+                mock.patch.object(a.time, "time", return_value=350.5), \
+                mock.patch.object(a, "log", side_effect=messages.append):
+            self.assertEqual(
+                saver.get_status_message(now=355.0),
+                "Autosave activo. Próxima copia por inactividad en 6 s.",
+            )
+            self.assertEqual(
+                a.status(),
+                "Autosave activo. Próxima copia por inactividad en 10 s.",
+            )
+        self.assertEqual(messages, [
+            "Autosave activo. Próxima copia por inactividad en 10 s."
+        ])
+
+    def test_status_reports_stalled_timer_instead_of_zero_countdown(self):
+        a = self.autosave
+        saver = a._autosaver
+        saver.running = True
+        saver.timer_id = 1
+        saver.last_tick = 100.0
+        saver.pending_idle_save = True
+        saver.last_change = 100.0
+
+        self.assertEqual(
+            saver.get_status_message(now=160.0),
+            "Autosave activo, pero el temporizador no responde (último aviso "
+            "hace 60 s). No se están haciendo copias automáticas; vuelve a "
+            "cargar Autosave.",
+        )
+
+    def test_start_off_ui_thread_defers_timer_to_ui_notification(self):
+        a = self.autosave
+        a._autosaver.stop()
+        saver = a.AutoSaver()
+        created = []
+
+        def create_timer():
+            created.append(True)
+            saver.timer_id = 7
+
+        with mock.patch.object(saver, "_on_ui_thread", return_value=False), \
+                mock.patch.object(saver, "_create_timer", side_effect=create_timer):
+            saver.start()
+            self.assertEqual(created, [])
+            self.assertIn("temporizador aún no está en marcha",
+                          saver.get_status_message())
+            a.editor.callbackSync.assert_called_with(saver.ensure_timer, [3])
+            a.notepad.callback.assert_called_with(saver.ensure_timer, [4])
+
+            saver.ensure_timer({})
+            saver.ensure_timer({})
+
+        self.assertEqual(created, [True])
 
     def test_startup_leaves_existing_copy_names_and_contents_unchanged(self):
         copy = self.write_copy("My Notes_abcdef12.txt")

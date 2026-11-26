@@ -33,6 +33,7 @@ import Npp
 import ctypes
 import binascii
 import hashlib
+import math
 import os
 import io
 import json
@@ -77,6 +78,20 @@ try:
     MODIFIED_NOTIFICATION = get_modified_notification()
 except AttributeError:
     MODIFIED_NOTIFICATION = None
+
+try:
+    UPDATEUI_NOTIFICATION = Npp.SCINTILLANOTIFICATION.UPDATEUI
+except AttributeError:
+    UPDATEUI_NOTIFICATION = None
+
+try:
+    BUFFERACTIVATED_NOTIFICATION = NOTIFICATION.BUFFERACTIVATED
+except AttributeError:
+    BUFFERACTIVATED_NOTIFICATION = None
+
+# ctypes callbacks of timers that could not be killed. They must stay alive
+# while Windows may still call them, even after the script is reloaded.
+_RETIRED_TIMER_PROCS = globals().get("_RETIRED_TIMER_PROCS", [])
 
 
 try:
@@ -1415,6 +1430,13 @@ def manual_force_save_all():
         log(u"No se pudo copiar ninguna pestaña. Revisa autosave.log.", "ERROR")
 
 
+def status():
+    """Show whether Autosave is running and when the next copy is due."""
+    message = _autosaver.get_status_message()
+    log(message)
+    return message
+
+
 def open_index():
     """Open index in browser."""
     import subprocess
@@ -1455,9 +1477,16 @@ class AutoSaver:
     is safe to call the Notepad++/Scintilla API from it. The previous
     implementation used threading.Timer (background threads), which is
     NOT thread-safe against Notepad++ and could crash or hang it.
+
+    Only startup.py runs on the UI thread. Scripts launched from the menu or
+    the console run on a PythonScript worker thread without a message loop,
+    where a NULL-hwnd timer never fires. In that case the timer is created
+    from the first synchronous UI notification (caret move, typing or tab
+    change) instead.
     """
 
     TICK_MS = 500  # timer resolution in milliseconds
+    STALLED_AFTER = 5  # seconds without ticks before reporting a stall
 
     def __init__(self):
         self.running = False
@@ -1467,6 +1496,7 @@ class AutoSaver:
         self.target_buffer = None     # buffer that was being edited
         self.pending_idle_save = False
         self.last_interval = 0.0
+        self.last_tick = 0.0
 
     def on_text_changed(self, args):
         """Called on the UI thread on every text change - schedules idle save."""
@@ -1516,6 +1546,47 @@ class AutoSaver:
             update_statusbar(u"✓ Copia {}".format(last_save_time.strftime("%H:%M:%S")))
         return ok
 
+    def get_status_message(self, now=None):
+        """Describe the timer state and the next scheduled save."""
+        if not self.running:
+            return u"Autosave detenido. No hay copias automáticas programadas."
+
+        if self.timer_id is None:
+            return (
+                u"Autosave cargado, pero el temporizador aún no está en marcha. "
+                u"Se activará al mover el cursor, escribir o cambiar de pestaña."
+            )
+
+        if now is None:
+            now = time.time()
+
+        since_tick = now - self.last_tick
+        if since_tick > self.STALLED_AFTER:
+            return (
+                u"Autosave activo, pero el temporizador no responde "
+                u"(último aviso hace {} s). No se están haciendo copias "
+                u"automáticas; vuelve a cargar Autosave."
+            ).format(int(since_tick))
+
+        next_copy = self.last_interval + get_interval_time()
+        copy_kind = u"periódica"
+
+        if self.pending_idle_save:
+            idle_copy = self.last_change + get_idle_time()
+            if idle_copy <= next_copy:
+                next_copy = idle_copy
+                copy_kind = u"por inactividad"
+
+        remaining = max(0, int(math.ceil(next_copy - now)))
+        if remaining >= 60:
+            duration = u"{} min {} s".format(remaining // 60, remaining % 60)
+        else:
+            duration = u"{} s".format(remaining)
+
+        return u"Autosave activo. Próxima copia {} en {}.".format(
+            copy_kind, duration
+        )
+
     def tick(self, hwnd, msg, timer_id, ticks):
         """UI-thread timer callback (runs ~2x/second)."""
         try:
@@ -1523,6 +1594,7 @@ class AutoSaver:
                 return
 
             now = time.time()
+            self.last_tick = now
 
             # ── Idle save: correct buffer, only after inactivity ──
             if self.pending_idle_save and (now - self.last_change) >= get_idle_time():
@@ -1560,9 +1632,63 @@ class AutoSaver:
         except Exception as e:
             log(u"Error al registrar la devolución de llamada: {}".format(e), "ERROR")
 
-        # Win32 timer with NULL hwnd is associated with the calling thread
-        # (the script runs on Notepad++'s main thread), so the callback is
-        # invoked from the message loop ON THE UI THREAD - safe for the API.
+        self.last_interval = time.time()
+
+        # These notifications are delivered synchronously on the UI thread,
+        # where the timer must be created to receive WM_TIMER messages.
+        try:
+            if UPDATEUI_NOTIFICATION is not None:
+                editor.callbackSync(self.ensure_timer, [UPDATEUI_NOTIFICATION])
+            if BUFFERACTIVATED_NOTIFICATION is not None:
+                notepad.callback(self.ensure_timer, [BUFFERACTIVATED_NOTIFICATION])
+        except Exception as e:
+            log(u"Error al registrar la activación del temporizador: {}".format(e), "ERROR")
+
+        if self._on_ui_thread():
+            self._create_timer()
+
+        try:
+            idle = get_idle_time()
+            interval = get_interval_time()
+
+            log(u"Autosave iniciado")
+            log(u"  - Pestaña activa: tras {} s sin actividad".format(idle))
+            log(u"  - Todas las pestañas: cada {} s ({} min)".format(interval, interval // 60))
+            if self.timer_id is None:
+                log(u"  - Temporizador pendiente: se activará al mover el cursor, "
+                    u"escribir o cambiar de pestaña")
+
+            update_statusbar(u"✓ Autosave activo")
+
+        except Exception as e:
+            log(u"Error al iniciar Autosave: {}".format(e), "ERROR")
+
+    def _on_ui_thread(self):
+        """Return True only when this code runs on the Notepad++ UI thread."""
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = user32.FindWindowW(u"Notepad++", None)
+            if not hwnd:
+                return False
+            pid = ctypes.c_ulong(0)
+            ui_thread = user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return (
+                pid.value == kernel32.GetCurrentProcessId()
+                and ui_thread == kernel32.GetCurrentThreadId()
+            )
+        except Exception:
+            return False
+
+    def ensure_timer(self, args=None):
+        """UI-thread notification handler: create the timer if it is missing."""
+        if self.running and self.timer_id is None:
+            self._create_timer()
+            if self.timer_id is not None:
+                log(u"Temporizador de Autosave en marcha")
+
+    def _create_timer(self):
+        """Create the Win32 timer. Must be called on the UI thread."""
         try:
             self._timer_proc = ctypes.WINFUNCTYPE(
                 None, ctypes.c_void_p, ctypes.c_uint,
@@ -1570,27 +1696,15 @@ class AutoSaver:
             )(self.tick)
             user32 = ctypes.windll.user32
             user32.SetTimer.restype = ctypes.c_size_t
-            self.timer_id = user32.SetTimer(None, 0, self.TICK_MS, self._timer_proc)
-            if not self.timer_id:
+            timer_id = user32.SetTimer(None, 0, self.TICK_MS, self._timer_proc)
+            if not timer_id:
                 raise RuntimeError("SetTimer devolvió 0")
+            self.last_tick = time.time()
+            self.timer_id = timer_id
         except Exception as e:
             self.timer_id = None
+            self._timer_proc = None
             log(u"Error al crear el temporizador: {}".format(e), "ERROR")
-
-        try:
-            self.last_interval = time.time()
-
-            idle = get_idle_time()
-            interval = get_interval_time()
-
-            log(u"Autosave iniciado")
-            log(u"  - Pestaña activa: tras {} s sin actividad".format(idle))
-            log(u"  - Todas las pestañas: cada {} s ({} min)".format(interval, interval // 60))
-
-            update_statusbar(u"✓ Autosave activo")
-
-        except Exception as e:
-            log(u"Error al iniciar Autosave: {}".format(e), "ERROR")
 
     def stop(self):
         """Stop all monitoring."""
@@ -1598,12 +1712,21 @@ class AutoSaver:
         
         try:
             if self.timer_id is not None:
-                ctypes.windll.user32.KillTimer(None, self.timer_id)
+                # A NULL-hwnd timer can only be killed from its own thread
+                # (the UI thread); when reloading from the console this fails.
+                # Keep the callback alive then: tick() returns immediately
+                # because running is False, and freeing it would crash.
+                if not ctypes.windll.user32.KillTimer(None, self.timer_id):
+                    _RETIRED_TIMER_PROCS.append(self._timer_proc)
                 self.timer_id = None
             self._timer_proc = None
 
             if MODIFIED_NOTIFICATION is not None:
                 editor.clearCallbacks([MODIFIED_NOTIFICATION])
+            if UPDATEUI_NOTIFICATION is not None:
+                editor.clearCallbacks([UPDATEUI_NOTIFICATION])
+            if BUFFERACTIVATED_NOTIFICATION is not None:
+                notepad.clearCallbacks([BUFFERACTIVATED_NOTIFICATION])
             log(u"Autosave detenido")
             
         except Exception as e:
@@ -1638,6 +1761,7 @@ log(u"Archivos originales → Solo se copian al directorio de respaldo")
 log(u"Todas las copias     → Subdirectorio _backup del directorio base")
 log(u"═" * 60)
 log(u"Comandos de copia:")
+log(u"  status()                 Mostrar estado y próxima copia")
 log(u"  manual_save()            Copiar pestaña activa modificada")
 log(u"  manual_save_all()        Copiar todas las pestañas modificadas")
 log(u"  manual_force_save_all()  Forzar copia de todas las pestañas")

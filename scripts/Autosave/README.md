@@ -172,6 +172,7 @@ menú de scripts, utiliza los nombres mostrados en la tabla.
 
 | Comando | Función |
 | --- | --- |
+| `status()` | Muestra si Autosave está activo y cuánto falta para la siguiente copia programada. |
 | `manual_save()` | Copia la pestaña activa si está modificada. |
 | `manual_save_all()` | Procesa todas las pestañas modificadas. |
 | `manual_force_save_all()` | Fuerza la copia de todas las pestañas abiertas, incluso las no modificadas o vacías. |
@@ -181,6 +182,16 @@ menú de scripts, utiliza los nombres mostrados en la tabla.
 | `_autosaver.stop()` | Detiene la supervisión automática. |
 | `_autosaver.start()` | Reinicia la supervisión automática. |
 
+`status()` distingue entre la siguiente copia por inactividad (cuando hay una
+edición pendiente) y la siguiente copia periódica. Solo escribe una línea en la
+consola de PythonScript (y en `autosave.log`); no abre ventanas.
+
+Si Autosave se carga desde el menú o la consola de PythonScript, el temporizador
+se pone en marcha con la siguiente interacción en Notepad++ (mover el cursor,
+escribir o cambiar de pestaña). Hasta entonces, `status()` lo indica. Si el
+temporizador deja de responder, `status()` también lo avisa en lugar de mostrar
+una cuenta atrás detenida.
+
 ## Solución de problemas
 
 - **Autosave no se inicia:** comprueba que PythonScript esté instalado, que
@@ -189,6 +200,7 @@ menú de scripts, utiliza los nombres mostrados en la tabla.
 - **No aparece una copia:** verifica que la pestaña esté modificada, espera el
   tiempo configurado y revisa `autosave.log` y la consola de PythonScript.
   Comprueba también los permisos de escritura del directorio de datos.
+  Ejecuta `status()` para confirmar que el temporizador está en marcha.
 - **Has cambiado `base_dir` y no ves los archivos antiguos:** las copias no se
   trasladan automáticamente. Revisa el directorio anterior y actualiza el
   registro del protocolo ejecutando `OpenAutosaveIndex` de nuevo.
