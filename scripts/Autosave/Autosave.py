@@ -43,6 +43,21 @@ from datetime import datetime
 text_type = type(u"")
 
 
+def to_text(value, encoding="utf-8"):
+    """Return text without relying on Python 2's ASCII coercion."""
+    if isinstance(value, text_type):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode(encoding)
+        except UnicodeDecodeError:
+            filesystem_encoding = sys.getfilesystemencoding() or "utf-8"
+            if filesystem_encoding.lower() != encoding.lower():
+                return value.decode(filesystem_encoding)
+            raise
+    return text_type(value)
+
+
 def get_modified_notification():
     """Return the editor modification notification for this PythonScript version."""
     for owner_name in ("SCINTILLANOTIFICATION", "NOTIFICATION"):
@@ -79,25 +94,20 @@ def escape_html(value):
     """Escape text so it can be inserted safely into HTML (attribute-safe)."""
     if value is None:
         return u""
-    if not isinstance(value, type(u"")):
-        value = u"{}".format(value)
+    value = to_text(value)
     return _html_escape(value, quote=True)
 
 
 def file_url(path):
     """Build a properly percent-encoded file:/// URL from a filesystem path."""
-    p = u"{}".format(path).replace(u"\\", u"/")
-    if not isinstance(p, bytes):
-        p = p.encode("utf-8")
+    p = to_text(path).replace(u"\\", u"/").encode("utf-8")
     # safe=":/" keeps the drive letter colon and slashes unencoded
     return u"file:///" + _url_quote(p, safe=":/")
 
 
 def filesystem_text(path):
-    """Keep filesystem bytes distinct from UTF-8 bytes returned by Npp."""
-    if isinstance(path, bytes):
-        return path.decode(sys.getfilesystemencoding())
-    return path
+    """Decode filesystem and PythonScript path bytes into Unicode."""
+    return to_text(path)
 
 
 def copy_url(path):
@@ -300,7 +310,8 @@ def update_statusbar(message):
 def sanitize_filename(name):
     """Remove invalid characters from filename."""
     if not name:
-        return ""
+        return u""
+    name = to_text(name)
     
     invalid = '<>:"/\\|?*\r\n\t'
     for ch in invalid:
@@ -316,6 +327,7 @@ def sanitize_filename(name):
 
 def get_document_name(text, index):
     """Get document name from line 1."""
+    text = to_text(text or u"")
     if not text:
         return u"untitled_{}".format(index)
     
@@ -475,6 +487,14 @@ def save_external_copy(directory, name, text, extension=u".txt", force=False,
                        buffer_id=None):
     """Create or update the single current external copy for a document."""
     try:
+        directory = filesystem_text(directory)
+        name = to_text(name)
+        text = to_text(text)
+        extension = to_text(extension)
+        if source_path is not None:
+            source_path = filesystem_text(source_path)
+        if source_name is not None:
+            source_name = to_text(source_name)
         digest = hashlib.md5(text.encode("utf-8")).hexdigest()
         copy_path = os.path.join(directory, name + extension)
 
@@ -504,10 +524,10 @@ def save_external_copy(directory, name, text, extension=u".txt", force=False,
 
 def get_backup_name(filepath, fallback_name):
     """Build a readable, collision-resistant backup name."""
-    identity = filepath or fallback_name
+    identity = to_text(filepath or fallback_name)
     normalized = os.path.normcase(os.path.normpath(identity))
     identity_hash = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
-    safe_name = sanitize_filename(fallback_name) or u"untitled"
+    safe_name = sanitize_filename(to_text(fallback_name)) or u"untitled"
     return u"{}_{}".format(safe_name, identity_hash)
 
 
@@ -548,6 +568,7 @@ def scan_files(directory):
             os.path.abspath(filesystem_text(OLD_DIR))
         )
         for filename in os.listdir(directory):
+            filename = filesystem_text(filename)
             if filename.endswith(".meta.json"):
                 continue
             if not show_all_files and not filename.endswith(".txt"):
@@ -1175,13 +1196,12 @@ def save_buffer(buffer_id, index, force=False):
             return False
         
         # Get current file path
-        filepath = notepad.getCurrentFilename()
+        filepath = filesystem_text(notepad.getCurrentFilename())
         
         # Get text
         text = editor.getText()
         
-        if isinstance(text, bytes):
-            text = text.decode("utf-8", errors="replace")
+        text = to_text(text)
         
         saved = is_file_saved(filepath)
         
@@ -1248,13 +1268,12 @@ def save_current_buffer():
             return False
         
         # Get current file path
-        filepath = notepad.getCurrentFilename()
+        filepath = filesystem_text(notepad.getCurrentFilename())
         
         # Get text
         text = editor.getText()
         
-        if isinstance(text, bytes):
-            text = text.decode("utf-8", errors="replace")
+        text = to_text(text)
         
         saved = is_file_saved(filepath)
         

@@ -134,6 +134,41 @@ class UntitledBackupTests(unittest.TestCase):
         self.assertIn('href="{}" class="file-link"'.format(expected), html)
         self.assertNotIn(a.file_url(str(backup)), html)
 
+    def test_index_handles_utf8_names_and_non_ascii_content(self):
+        a = self.autosave
+        name = (
+            "direcci\u00f3n_\u0634\u0627\u0631\u0639 "
+            "\u062c\u0627\u062f\u0629 \u0627\u0644\u062a\u0646\u0645\u064a\u0629.txt"
+        )
+        content = (
+            "7871 Jada Al Tanmyah St. ("
+            "\u0634\u0627\u0631\u0639 \u062c\u0627\u062f\u0629 "
+            "\u0627\u0644\u062a\u0646\u0645\u064a\u0629"
+            ")\nKing Abdullah Economic City"
+        )
+        backup = self.directory / name
+        backup.write_text(content, encoding="utf-8")
+        Path(str(backup) + ".meta.json").write_text(json.dumps({
+            "original_name": name,
+            "original_path": "C:\\Documents\\{}".format(name),
+        }, ensure_ascii=False), encoding="utf-8")
+
+        real_listdir = a.os.listdir
+
+        def utf8_filenames(path):
+            return [
+                entry.encode("utf-8") if isinstance(entry, str) else entry
+                for entry in real_listdir(path)
+            ]
+
+        with mock.patch.object(a.os, "listdir", side_effect=utf8_filenames):
+            a.generate_index()
+
+        html = Path(a.INDEX_FILE).read_text(encoding="utf-8")
+        self.assertIn(name, html)
+        self.assertIn("\u0634\u0627\u0631\u0639 \u062c\u0627\u062f\u0629 \u0627\u0644\u062a\u0646\u0645\u064a\u0629", html)
+        self.assertNotIn("b&#x27;", html)
+
     def test_windows_copies_preserve_line_endings_and_metadata_hash(self):
         a = self.autosave
         real_open = io.open

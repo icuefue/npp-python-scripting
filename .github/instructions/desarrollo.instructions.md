@@ -69,6 +69,9 @@ applyTo: "**"
 - Cuando esté disponible Python 2.7, comprueba también la sintaxis de los
   scripts Python con
   `python2 -m py_compile scripts/Autosave/Autosave.py scripts/OpenAutosaveIndex/OpenAutosaveIndex.py`.
+  En este entorno está disponible en
+  `~/.pyenv/versions/2.7.18/bin/python2.7`; usa esa ruta si `python2` no está
+  en el `PATH`.
   Verifica los cambios que dependan del plugin en Notepad++ con PythonScript
   2.7 cuando sea posible. Indica expresamente qué validaciones no se han
   podido ejecutar.
