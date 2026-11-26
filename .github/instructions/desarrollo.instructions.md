@@ -67,7 +67,8 @@ applyTo: "**"
   También puede ejecutarse con `pwsh` donde esté disponible; las pruebas
   simuladas no sustituyen la comprobación real en Windows.
 - Cuando esté disponible Python 2.7, comprueba también la sintaxis de los
-  scripts Python con `python2 -m py_compile Autosave.py OpenAutosaveIndex.py`.
+  scripts Python con
+  `python2 -m py_compile scripts/Autosave/Autosave.py scripts/OpenAutosaveIndex/OpenAutosaveIndex.py`.
   Verifica los cambios que dependan del plugin en Notepad++ con PythonScript
   2.7 cuando sea posible. Indica expresamente qué validaciones no se han
   podido ejecutar.

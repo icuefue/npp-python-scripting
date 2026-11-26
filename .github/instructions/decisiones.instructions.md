@@ -18,6 +18,17 @@ consecuencias. Distingue los motivos conocidos de los que no estén registrados.
 - **Consecuencia:** las pruebas con Python 3 no bastan para asegurar la
   compatibilidad con el entorno real.
 
+## Ubicación de los scripts
+
+- **Decisión:** mantener cada componente en su carpeta bajo `scripts/` y las
+  pruebas en `tests/`. `OpenAutosaveFile.ps1` acompaña a `OpenAutosaveIndex.py`
+  en su carpeta.
+- **Motivo:** organizar cada script con su documentación y sus archivos
+  necesarios; el lanzador PowerShell se busca junto al script del índice.
+- **Consecuencia:** los enlaces y pruebas apuntan a la carpeta correspondiente.
+  Para instalar los scripts se copian sus archivos a la carpeta de PythonScript,
+  manteniendo juntos el script del índice y su lanzador.
+
 ## Copias externas, no guardado de originales
 
 - **Decisión:** Autosave crea una copia actual por documento en `_backup` y

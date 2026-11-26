@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot '../OpenAutosaveFile.ps1')
+. (Join-Path $PSScriptRoot '../scripts/OpenAutosaveIndex/OpenAutosaveFile.ps1')
 
 function New-TestLink {
     param([string]$Name, [string]$Bucket = 'backup')
