@@ -242,6 +242,12 @@ menú de scripts, utiliza los nombres mostrados en la tabla.
   trasladan automáticamente. Revisa el directorio anterior y actualiza el
   registro del protocolo ejecutando `OpenAutosaveIndex` de nuevo.
 
+## Desarrollo
+
+Las [instrucciones de desarrollo](.github/instructions/desarrollo.instructions.md)
+y el [registro de decisiones](.github/instructions/decisiones.instructions.md)
+son compartidos por GitHub Copilot y Claude Code.
+
 ## Licencia y atribución
 
 Distribuido bajo la [licencia MIT](./LICENSE). Copyright © 2026 icuefue.
