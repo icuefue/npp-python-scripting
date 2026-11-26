@@ -22,6 +22,10 @@ applyTo: "**"
 
 ## Forma de trabajar
 
+- Crea una rama nueva `feature/<nombre-descriptivo>` para cada nueva
+  funcionalidad. Para otros tipos de trabajo se admiten prefijos habituales
+  de Gitflow, como `bugfix/`, `hotfix/` y `release/`.
+- Integra las ramas en `main` mediante pull requests.
 - Prioriza soluciones simples, claras y suficientes para el requisito. Evita
   abstracciones, dependencias, configuraciones y cambios de alcance que no
   sean necesarios.
