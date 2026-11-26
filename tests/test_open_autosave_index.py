@@ -22,7 +22,9 @@ class OpenAutosaveIndexTests(unittest.TestCase):
         self.config_dir.mkdir(parents=True)
         self.notepad = mock.Mock()
         spec = importlib.util.spec_from_file_location(
-            "open_index_test", Path(__file__).resolve().parents[1] / "OpenAutosaveIndex.py"
+            "open_index_test",
+            Path(__file__).resolve().parents[1]
+            / "scripts" / "OpenAutosaveIndex" / "OpenAutosaveIndex.py",
         )
         self.script = importlib.util.module_from_spec(spec)
         with mock.patch.dict(sys.modules, {"Npp": types.SimpleNamespace(notepad=self.notepad)}):

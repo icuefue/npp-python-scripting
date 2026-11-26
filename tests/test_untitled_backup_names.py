@@ -25,7 +25,8 @@ class UntitledBackupTests(unittest.TestCase):
         npp.STATUSBARSECTION = types.SimpleNamespace(DOCTYPE=1)
         self.npp = npp
         spec = importlib.util.spec_from_file_location(
-            "autosave_test", Path(__file__).resolve().parents[1] / "Autosave.py"
+            "autosave_test",
+            Path(__file__).resolve().parents[1] / "scripts" / "Autosave" / "Autosave.py",
         )
         self.spec = spec
         self.autosave = importlib.util.module_from_spec(spec)
